@@ -173,12 +173,14 @@ class TestTrayShowsAway(unittest.TestCase):
         # 时间表在 11:30 结束; 用 11:00 构造一个"判定中且已报告离开"的状态
         self.rt.sm.away_since = 0.0
         self.rt.sm.away_reported = True
-        self.rt._policy = lambda at: types.SimpleNamespace(judging=True, block_name="上午")
+        self.rt._policy = lambda at: types.SimpleNamespace(
+            judging=True, block_name="上午", camera_yield=False)
         self.assertEqual(self.rt.state_key(), "away")
         self.assertIn("离开座位", self.rt.status_text())
 
     def test_state_key_judging_when_present(self):
-        self.rt._policy = lambda at: types.SimpleNamespace(judging=True, block_name="上午")
+        self.rt._policy = lambda at: types.SimpleNamespace(
+            judging=True, block_name="上午", camera_yield=False)
         self.assertEqual(self.rt.state_key(), "judging")
 
 

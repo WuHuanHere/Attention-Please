@@ -130,6 +130,11 @@ def build_report(cfg: Config, store: Store, day: str,
                  f"(低于 90% 时「看手机」信号不可靠)")
     if st.camera_busy_seconds:
         lines.append(f"- ⚠️ 因摄像头被占用漏检 {_hm(st.camera_busy_seconds)}")
+    if st.yield_seconds > 30:
+        # "漏报必须可见": 让出期间**完全没有监控数据**(而它可能是你的学习时段),
+        # 必须写清楚是主动让给别的程序了 —— 否则看报告的人会以为"我明明在学却没记上"。
+        lines.append(f"- 📷 主动把摄像头让给别的程序(会议/通话/直播)共 "
+                     f"{_hm(st.yield_seconds)} —— 这段时间没有监控数据, 不是你没专注")
     if st.blind_seconds > 60:
         lines.append(f"- ⚠️ 有 {_hm(st.blind_seconds)} 人脸不在画面里, "
                      f"这段时间只做了窗口检测")

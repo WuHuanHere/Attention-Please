@@ -192,6 +192,37 @@ class Wordlists:
     blacklist: list[str] = field(default_factory=list)
 
 
+# 默认的"让出摄像头"关键词表。
+#
+# ⚠️ **绝对不要把"微信"/"QQ"单独放进来**: 它们在 blacklist 里, 是分心信号要抓的目标。
+# 前台一挂微信就让出摄像头 = 给自己开了一个"免监控后门", 而且正好在它该抓你的时候失效。
+# 要匹配视频通话, 用通话窗口才有的词(如"视频通话")。
+DEFAULT_YIELD_APPS = [
+    "腾讯会议", "钉钉", "飞书", "Zoom", "Teams",
+    "OBS", "相机", "Camera",
+    "视频通话", "语音通话", "正在通话",
+]
+
+
+@dataclass
+class CameraYield:
+    """把摄像头让给别的程序(会议/通话/直播软件)。
+
+    为什么必须"主动让": Windows **没有**"别的程序想要摄像头"的通知接口。实测
+    (2026-09-18): 我们用 DirectShow 占着摄像头时, 别的程序(尤其走 Media Foundation
+    的会议软件)打不开它, 而**我们的 `cap.read()` 照样成功** —— 于是我们完全察觉不到
+    有人在等。当天日志里 `camera_read_fail`/`camera_busy` 一条都没有, 就是这个原因。
+
+    所以只能靠前台窗口标题主动判断: 命中 `apps` 关键词就**立刻释放摄像头 + 暂停判定**,
+    这段时间在日报里如实记成"让出摄像头"(不假装你在专注)。
+    """
+
+    enabled: bool = True
+    apps: list[str] = field(default_factory=lambda: list(DEFAULT_YIELD_APPS))
+    # 托盘"让出摄像头 N 分钟"的默认时长(给关键词匹配不到的软件兜底)
+    manual_minutes: int = 30
+
+
 @dataclass
 class Privacy:
     save_captures: bool = True
@@ -215,6 +246,7 @@ class Config:
     quiet_hours: QuietHours = field(default_factory=QuietHours)
     detection: Detection = field(default_factory=Detection)
     wordlists: Wordlists = field(default_factory=Wordlists)
+    camera_yield: CameraYield = field(default_factory=CameraYield)
     privacy: Privacy = field(default_factory=Privacy)
     report: Report = field(default_factory=Report)
     path: Path = DEFAULT_CONFIG
@@ -261,6 +293,7 @@ class Config:
         d = raw.get("detection", {})
         wl = raw.get("whitelist", {})
         bl = raw.get("blacklist", {})
+        cy = raw.get("camera_yield", {})
         pv = raw.get("privacy", {})
         rp = raw.get("report", {})
         sc = raw.get("schedule", {})
@@ -316,6 +349,11 @@ class Config:
             wordlists=Wordlists(
                 whitelist=list(wl.get("words", [])),
                 blacklist=list(bl.get("words", [])),
+            ),
+            camera_yield=CameraYield(
+                enabled=bool(cy.get("enabled", True)),
+                apps=[str(x) for x in cy.get("apps", DEFAULT_YIELD_APPS)],
+                manual_minutes=int(cy.get("manual_minutes", 30)),
             ),
             privacy=Privacy(
                 save_captures=bool(pv.get("save_captures", True)),

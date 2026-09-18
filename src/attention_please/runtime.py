@@ -44,6 +44,9 @@ from .ui import AlertRequest, AlertUI
 
 LOCK_PORT = 47731          # 单实例: 这个端口被占用说明已经有一个在跑
 CAMERA_RETRY_SECONDS = 30
+# 摄像头打不开时的重试上限。**逐步退让**而不是固定 30 秒: 固定间隔等于每 30 秒就把
+# 摄像头抢回来一次, 会跟正在用它的程序(会议软件等)反复拉锯。
+CAMERA_RETRY_MAX_SECONDS = 300
 CAMERA_RELEASE_AFTER = 120
 CONFIG_RELOAD_SECONDS = 60
 SUMMARY_EVERY_SECONDS = 300
@@ -108,6 +111,7 @@ class Runtime:
         self.cam_info: CameraInfo | None = None
         self.cam_fail_since: datetime | None = None
         self.cam_next_retry: float = 0.0
+        self.cam_fail_count: int = 0
         self.idle_since: float = time.monotonic()
         self.running = True
         self._stop_event = threading.Event()
@@ -117,6 +121,10 @@ class Runtime:
         self.pause_started: datetime | None = None
         self.pause_reason = ""
         self.manual_until: datetime | None = None
+        # --- 摄像头让出(会议/通话/直播软件) ---
+        self.yield_until: datetime | None = None      # 手动让出到这个时刻
+        self._yield_since: datetime | None = None     # 当前这次让出的起点(用来记时长)
+        self._yield_reason = ""
         # --- 每日任务记账 ---
         self._report_day: str | None = None
         self._cleanup_day: str | None = None
@@ -134,29 +142,85 @@ class Runtime:
     # ------------------------------------------------------------------
     # 策略: 时间表 + 安静时段 + 启用信号
     # ------------------------------------------------------------------
-    def _policy(self, at: datetime) -> Policy:
+    def _policy(self, at: datetime, title: str | None = None) -> Policy:
         enabled = frozenset(self.cfg.detection.enabled_signals)
         with self._lock:
             paused = self.paused
             manual_until = self.manual_until
+            yield_until = self.yield_until
         if paused:
             return Policy(judging=False, enabled=enabled, block_name="已暂停")
+
+        # --- 先算出"本来该不该判定"(作息表 + 手动学习) ---
         # 作息表优先于"手动学习": 否则你在"英语单词"块里点手动学习,
         # 会把这个块的 allow_phone=true 冲掉, 背单词反而被当成玩手机。
         block = self.cfg.schedule.block_at(at)
-        if block is None and manual_until is not None and at < manual_until:
-            return Policy(judging=True, allow_phone=False,
-                          quiet=self.cfg.quiet_hours.is_quiet(at),
-                          block_name="手动学习", enabled=enabled)
-        if block is None:
+        if block is not None:
+            would_judge, block_name, allow_phone = True, block.name, block.allow_phone
+        elif manual_until is not None and at < manual_until:
+            would_judge, block_name, allow_phone = True, "手动学习", False
+        else:
+            # 时间表外本来就待机(摄像头也已经释放了), **没什么可让的**。
+            # 这里必须直接返回, 不能走下面的让出分支 —— 否则你晚上挂着会议室,
+            # 日报会把整个晚上都算成"主动让出摄像头", 那是骗人的。
             return Policy(judging=False, enabled=enabled, block_name="")
+
+        # --- 本来该判定 -> 现在问"要不要把摄像头让出去" ---
+        # 手动让出优先于自动判断 —— 手动是明确的用户意图。
+        if yield_until is not None and at < yield_until:
+            left = (yield_until - at).total_seconds() / 60.0
+            return Policy(judging=False, enabled=enabled, camera_yield=True,
+                          block_name=f"已让出摄像头(手动, 还剩 {left:.0f} 分钟)")
+        hit = self._yield_app(at, title)
+        if hit is not None:
+            return Policy(judging=False, enabled=enabled, camera_yield=True,
+                          block_name=f"已让出摄像头(前台是「{hit}」)")
+
         return Policy(
             judging=True,
-            allow_phone=block.allow_phone,
+            allow_phone=allow_phone,
             quiet=self.cfg.quiet_hours.is_quiet(at),
-            block_name=block.name,
+            block_name=block_name,
             enabled=enabled,
         )
+
+    def _yield_app(self, at: datetime, title: str | None = None) -> str | None:
+        """前台窗口是不是"要用摄像头的软件"? 是就返回命中的关键词。
+
+        ⚠️ Windows 不会告诉我们"别的程序想要摄像头"(实测: 我们占着摄像头时, 别人的
+        打开请求失败, 而我们的 cap.read() 照样成功 —— 完全察觉不到)。所以只能靠这个
+        主动判断。匹配的是**窗口标题**, 关键词表在 config.toml 的 `[camera_yield]`。
+
+        注意: 关键词必须**特定到"这个程序正在用摄像头"**, 不能只是"这个程序开着" ——
+        尤其不能把"微信"/"QQ"放进去(那等于给自己开免监控后门, 详见 config.DEFAULT_YIELD_APPS)。
+        """
+        cy = self.cfg.camera_yield
+        if not cy.enabled or not cy.apps:
+            return None
+        text = title if title is not None else foreground.foreground_title()
+        if not text:
+            return None
+        for word in cy.apps:
+            if word and word.lower() in text.lower():
+                return word
+        return None
+
+    def yield_camera(self, minutes: int | None = None) -> None:
+        """托盘点"让出摄像头": 释放摄像头 + 暂停判定一段时间(给关键词匹配不到的软件兜底)。"""
+        mins = minutes if minutes is not None else self.cfg.camera_yield.manual_minutes
+        with self._lock:
+            self.yield_until = datetime.now() + timedelta(minutes=mins)
+        self._say(f"📷 让出摄像头 {mins} 分钟(判定暂停, 这段时间会记进日报的'让出')")
+        self._log("camera_yield", detail=f"手动让出 {mins} 分钟")
+
+    def reclaim_camera(self) -> None:
+        """托盘点"收回摄像头"。"""
+        with self._lock:
+            had = self.yield_until is not None
+            self.yield_until = None
+        if had:
+            self._say("📷 收回摄像头(恢复判定)")
+            self._log("camera_yield_end", detail="手动收回")
 
     # ------------------------------------------------------------------
     # 暂停 / 手动学习 / 状态(托盘与运行时之间的接口, 都可能跨线程调用)
@@ -213,6 +277,8 @@ class Runtime:
             return "paused"
         if self.cam_fail_since is not None:
             return "camera_busy"
+        if self._policy(datetime.now()).camera_yield:
+            return "yielded"
         if not self._policy(datetime.now()).judging:
             return "idle"
         # 人不在画面里(且已判定为离开)也要在托盘上看得出来 ——
@@ -227,6 +293,7 @@ class Runtime:
                                       tick_hz=self.cfg.general.tick_hz)
             state = {"judging": "判定中", "idle": "待机", "paused": "已暂停",
                      "camera_busy": "摄像头不可用",
+                     "yielded": "已让出摄像头",
                      "away": "离开座位(只记录)"}.get(self.state_key(), self.state_key())
             block = self._policy(datetime.now()).block_name
             head = f"attention_please — {state}" + (f"·{block}" if block else "")
@@ -254,7 +321,14 @@ class Runtime:
                 self._log("camera_busy", detail="摄像头打不开(被会议软件/OBS 占用?)")
                 self._say(f"⚠️ 摄像头打不开 —— 监控暂停, {CAMERA_RETRY_SECONDS} 秒后重试。"
                       f"这段时间会记进日报的'漏检'。")
-            self.cam_next_retry = now + CAMERA_RETRY_SECONDS
+            # **逐步退让**: 固定 30 秒重试等于每 30 秒就把摄像头抢回来一次, 会跟
+            # 正在用它的程序反复拉锯(对方可能因此一直拿不到)。越失败越等得久, 上限 5 分钟。
+            self.cam_fail_count += 1
+            delay = min(CAMERA_RETRY_SECONDS * (2 ** (self.cam_fail_count - 1)),
+                        CAMERA_RETRY_MAX_SECONDS)
+            self.cam_next_retry = now + delay
+            if self.cam_fail_count > 1:
+                self._say(f"   (连续 {self.cam_fail_count} 次打不开, 这次等 {delay} 秒再试)")
             return False
         # 只留 1 帧缓冲, 否则会读到几秒前的旧画面(必须用 CAP_PROP_BUFFERSIZE, 别写魔数)
         set_buffer_size(cap, 1)
@@ -267,6 +341,7 @@ class Runtime:
             self._log("camera_busy_end", duration=dur)
             self._say(f"✅ 摄像头恢复(此前漏检 {dur / 60:.1f} 分钟)")
             self.cam_fail_since = None
+        self.cam_fail_count = 0        # 成功一次就把退让计数清零
         if self.analyzer is None:
             self._say("加载 MediaPipe 模型 ...")
             self.analyzer = FrameAnalyzer(self.cfg.models_dir / "pose_landmarker_lite.task",
@@ -287,6 +362,34 @@ class Runtime:
             # 那样的帧不许进直立基准(否则转头会把自己的基准拖歪)。
             "reference_max_yaw_deg": self.cal.phone_yaw_deg,
         }
+
+    def _should_release_now(self, policy: Policy, mono: float) -> bool:
+        """现在该不该释放摄像头。
+
+        两种"不判定"要区别对待:
+          - **让出**(别的程序要用): **立刻**放 —— 人家正等着, 不能等 120 秒;
+          - 普通待机(作息表外/休息): 等 120 秒 —— 否则休息的几分钟里会反复开开关关。
+        """
+        return policy.camera_yield or (mono - self.idle_since > CAMERA_RELEASE_AFTER)
+
+    def _track_yield(self, policy: Policy, now: datetime) -> None:
+        """让出摄像头的开始/结束留痕。
+
+        "漏报必须可见"这条铁律在这里的意思是: 让出期间**没有监控数据**, 日报必须
+        写清楚是"让给别的程序了", 而不是让人以为"我明明在学却没记上"。
+        """
+        if policy.camera_yield:
+            if self._yield_since is None:
+                self._yield_since = now
+                self._yield_reason = policy.block_name
+                self._say(f"📷 {policy.block_name} —— 摄像头已让出, 判定暂停")
+                self._log("camera_yield", at=now, detail=policy.block_name)
+        elif self._yield_since is not None:
+            dur = (now - self._yield_since).total_seconds()
+            self._log("camera_yield_end", at=now, duration=dur, detail=self._yield_reason)
+            self._say(f"📷 收回摄像头(让出 {dur / 60:.1f} 分钟)")
+            self._yield_since = None
+            self._yield_reason = ""
 
     def _release_camera(self) -> None:
         if self.cap is not None:
@@ -363,11 +466,14 @@ class Runtime:
         # UI 事件(暂停理由/判定错了/关闭弹窗)必须在**任何状态下**都处理:
         # 漏掉这一步的后果是"弹窗弹了、理由也输了, 但什么都没发生"。
         self._drain_ui(mono)
-        policy = self._policy(now)
+        # 前台标题只取一次, 既给策略判断(要不要让出摄像头)也给这一帧的 Observation。
+        title = foreground.foreground_title()
+        policy = self._policy(now, title=title)
         enabled = frozenset(self.cfg.detection.enabled_signals)
+        self._track_yield(policy, now)
 
         if not policy.judging:
-            if self.cap is not None and mono - self.idle_since > CAMERA_RELEASE_AFTER:
+            if self.cap is not None and self._should_release_now(policy, mono):
                 self._release_camera()
             # Pose 弱证据的基准是"你最近的样子"。待机/休息久了它就过期了 ——
             # 拿一小时前(甚至午休前)的姿势当基准, 等于在猜。清掉, 恢复判定后重新学。
@@ -404,7 +510,7 @@ class Runtime:
             yaw_std=feats.yaw_std, pitch_std=feats.pitch_std,
             blink_rate=feats.blink_rate, eye_closed_ratio=feats.eye_closed_ratio,
             idle_seconds=input_activity.idle_seconds(),
-            title=foreground.foreground_title(),
+            title=title,
             pose_head=feats.pose_head,
         )
         self.dispatch(self.sm.update(obs, policy), frame)

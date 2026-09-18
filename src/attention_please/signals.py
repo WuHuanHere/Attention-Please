@@ -95,6 +95,9 @@ class Policy:
     allow_phone: bool = False     # 该时段"看手机"只记录不报警
     quiet: bool = False           # 安静时段: 不发声, 只弹窗
     block_name: str = ""
+    # 这一轮不判定的原因是"要把摄像头让给别的程序"。状态机不用它(它只看 judging),
+    # 但 runtime 要据此**立刻**释放摄像头(而不是等 120 秒的常规释放)。
+    camera_yield: bool = False
     # 只启用这些信号。默认 = 全开(默认值就该是"不设限"), 真正生效的集合由 runtime
     # 按 config.toml 的 enabled_signals 填。曾经这里硬写 ["screen","phone","daze"],
     # 结果是"新增一个信号但默认值里没有它" —— 单测里它永远不触发, 而生产里会触发,

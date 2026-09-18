@@ -133,7 +133,7 @@ class TestTray(unittest.TestCase):
     def test_state_key_idle_outside_schedule(self):
         # 时间表只有 08:30-10:30; 用一个必然在区间外的时刻
         self.rt._policy = lambda at: self.rt.cfg and type(
-            "P", (), {"judging": False, "block_name": ""})()
+            "P", (), {"judging": False, "block_name": "", "camera_yield": False})()
         self.assertEqual(self.rt.state_key(), "idle")
 
     def test_status_text_survives_empty_db(self):

@@ -2,6 +2,7 @@
 
 状态用颜色区分(托盘图标很小, 颜色比文字快):
   绿 = 判定中   灰 = 待机(时间表外)   黄 = 已暂停   红 = 摄像头不可用
+  蓝 = 人不在画面里(只记录)   紫 = 已让出摄像头(给别的程序用)
 
 菜单里的"暂停"必须填理由 —— 这就是"有代价的暂停"的代价本身, 理由会进日报。
 输入框走 ui.AlertUI(整个进程只有一个 Tk 实例), 所以这里只发请求、不等结果。
@@ -26,6 +27,7 @@ STATE_COLORS = {
     "paused": (241, 196, 15),
     "camera_busy": (231, 76, 60),
     "away": (52, 152, 219),      # 蓝: 人不在画面里(只记录, 不提醒)
+    "yielded": (155, 89, 182),   # 紫: 摄像头让给别的程序了(会议/通话/直播)
 }
 
 
@@ -75,6 +77,21 @@ class Tray:
     def _manual(self) -> None:
         self.rt.start_manual_session(60)
         self._notify("已开始 60 分钟手动学习(时间表外也会判定)")
+
+    def _yield(self) -> None:
+        """把摄像头让给别的程序(会议/通话/直播)。
+
+        给"关键词匹配不到"的软件兜底 —— 你打开别的软件发现拿不到摄像头时, 点这个。
+        """
+        mins = self.rt.cfg.camera_yield.manual_minutes
+        self.rt.yield_camera(mins)
+        self._notify(f"已让出摄像头 {mins} 分钟(判定暂停, 会记进日报)")
+        self._refresh_icon()
+
+    def _reclaim(self) -> None:
+        self.rt.reclaim_camera()
+        self._notify("已收回摄像头, 恢复判定")
+        self._refresh_icon()
 
     def _open_report(self) -> None:
         """生成(或读取)今天的日报, 然后**用自己的窗口显示**。
@@ -151,6 +168,10 @@ class Tray:
             pystray.MenuItem("暂停监控(要写理由)", lambda: self._pause()),
             pystray.MenuItem("恢复学习", lambda: self._resume()),
             pystray.MenuItem("现在开始学习(60 分钟)", lambda: self._manual()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(lambda item: f"让出摄像头({self.rt.cfg.camera_yield.manual_minutes} 分钟)",
+                             lambda: self._yield()),
+            pystray.MenuItem("收回摄像头", lambda: self._reclaim()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("打开今日日报", lambda: self._open_report()),
             pystray.MenuItem("查看分心截图", lambda: self._open_captures()),

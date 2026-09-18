@@ -60,6 +60,7 @@ class DayStats:
     episodes: int = 0
     wrong_feedback: int = 0
     camera_busy_seconds: float = 0.0
+    yield_seconds: float = 0.0        # 把摄像头让给别的程序(会议/通话/直播)的时长
     coverage: float = 0.0             # 人脸覆盖率 0..1
     monitored_seconds: float = 0.0    # **实际监控时长** —— 比值要用它当分母
     first_monitored: str = ""         # "HH:MM", 今天第一次判定的时刻
@@ -167,6 +168,8 @@ class Store:
                 st.wrong_feedback += 1
             elif kind == "camera_busy_end":
                 st.camera_busy_seconds += duration
+            elif kind == "camera_yield_end":
+                st.yield_seconds += duration
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"
