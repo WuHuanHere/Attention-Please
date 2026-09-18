@@ -90,7 +90,7 @@ Get-ChildItem src\attention_please\*.py | Sort-Object LastWriteTime -Descending 
 | 开机自启 | ✅ 已安装 |
 | 文件日志(托盘版可诊断) | ✅ `data/logs/` |
 | 单测 | ✅ **207 项全绿**(7 项 UI 测试默认跳过) |
-| 版本控制 | ❌ **没有 git 仓库** —— 建议第一步就 `git init` |
+| 版本控制 | ✅ **已建 git 仓库**(2026-09-18),`main` 分支,58 个文件已提交;`.venv`/模型/`data/`/`captures/`/`calibration.json`/`probe_out/` 已忽略 |
 
 ### 代码规模
 
@@ -385,7 +385,8 @@ $env:AP_UI_TESTS='1'; .\.venv\Scripts\python.exe -m unittest tests.test_ui_lifec
   太敏感就调 `phone_continuous_seconds`(25 → 35)。数据在 `event` 表 `signal='phone'`。
 - **离座提醒需要重启实例才生效**(代码已就绪)。
 - **日报口径修复也需要重启**(否则 21:30 的日报还是旧分母)。
-- **`git init`**:目前**没有版本控制**,6842 行代码裸奔,建议第一件事就初始化并提交一次。
+- ~~**`git init`**~~ → **已完成**(2026-09-18):`main` 分支,首次提交 `6016a2c`(57 文件/9719 行)
+  + `.gitattributes`(行尾统一 LF)。改代码前建议先开分支,改完 `git diff` 自查。
 - 可选:周报、打包 exe、多显示器支持、把"离开提醒通道"做成独立配置(现在跟随安静时段)。
 
 ---
