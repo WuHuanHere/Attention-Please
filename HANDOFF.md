@@ -3,7 +3,8 @@
 > **给下一个 agent**:这份文档是自包含的。读它 + `PROGRESS.md`(事故与实测记录)+ `README.md`(用户手册)
 > 就能接手。不要重新做已经做过的调研,不要重复踩下面"雷区清单"里的坑。
 >
-> 项目根目录:`E:\Users\Wu Fan\OneDrive\Code\attention_please`
+> 项目根目录:**`E:\Code\attention_please`**(2026-09-18 已从 OneDrive 目录树搬出,
+> 原因见 §5 第 4 条;搬移后自启快捷方式已重装指向新路径)
 > 最后更新:2026-09-18 13:00
 
 ---
@@ -229,6 +230,14 @@ scripts/
    所以不受这个限制。等价的 Python 写法是 `os.replace()`。
    另外:harness 要求**先 read 再 edit**(否则报 `file has not been read`),而 read 状态会
    在某些操作后失效 —— 报错就重新 read 一次,别怀疑文件坏了。
+4b. **中文 Windows 控制台是 GBK, 而提醒文案里有 emoji(🔔 ⏹ 💤 👋)**。
+   `print` 会抛 `UnicodeEncodeError`;而 `dispatch` 的顺序是
+   `记账 → print → 响铃 → 弹窗`, print 一抛**响铃和弹窗被整段跳过** ——
+   库里记了一笔"提醒", 你却既没听见也没看见(2026-09-18 实测抓到)。
+   修法:所有输出走 `logbook.safe_print()`(编不出来的字符降级成 `?`, 绝不抛异常),
+   runtime 内用 `self._say()`;回归测试 `tests/test_encoding.py`(7 项)。
+   **别再往提醒文案里塞裸 emoji 直接 print。**
+
 5. **`pythonw` 下 stdout 是"存在但没人看"**(不报错,内容消失)。所以必须有文件日志
    (`logbook.install_streams`),否则托盘版出事现场一片空白。
 
@@ -279,9 +288,11 @@ scripts/
 
 ### 已知偶发(不是 bug, 别慌)
 
-- **单测偶尔报 `FAILED (errors=12, skipped=7)` 而没有任何 `FAIL`**:2026-09-18 遇到一次,
-  随后**连跑 11 次(含 4 路 I/O 负载)全绿**。判断是临时目录/线程 join 的时序竞争。
-  **处理**:先重跑;若复现, 先把完整 traceback 存下来再动手(别直接改测试)。
+- ~~单测偶尔报 `FAILED (errors=12, skipped=7)`~~ → **已定位, 不是 flake**:
+  那是 **GBK 控制台 + 提醒文案里的 emoji** 让 `print` 抛 `UnicodeEncodeError`
+  (见 §5 第 4b 条)。当时"连跑 11 次全绿"是因为那些命令都设了
+  `PYTHONIOENCODING=utf-8`, 而失败的那次没设 —— 它是**确定性**的, 不是偶发。
+  现已修复:UTF-8 / GBK / 不设编码 三种情况各 214 项全绿。
 - **编辑工具偶发 `ReplaceFileW EIO`**:见 §5 第 4 条(已查证, 有绕法)。
 ## 6. 已修 bug 全表(现象 / 根因 / 回归测试)
 

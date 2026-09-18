@@ -454,6 +454,28 @@ screen_active = pose_present and head_up and 标题命中黑名单
 回来后再离开能重新提醒、离开不算分心、离开提醒必弹窗且不自动关闭、
 普通 L1 有声时仍然不弹窗。
 
+## 七之十一、GBK 控制台吞掉提醒(2026-09-18 定位并修复)
+
+**现象**:单测偶尔报 `FAILED (errors=12)`, 而"同一条命令加不加
+`PYTHONIOENCODING=utf-8` 结果不同" —— 一度被当成"偶发 flake"。
+
+**根因**:
+
+```
+UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f514' (🔔)
+  File "runtime.py", line 438, in dispatch
+```
+
+中文 Windows 控制台默认 **GBK**, 而提醒文案里有 emoji。`dispatch` 的顺序是
+`记账 → print → 响铃 → 弹窗`, print 一抛, **响铃和弹窗被整段跳过** ——
+**记账了但没提醒**, 正好违反"记账优先于提醒"。
+
+**修法**:`logbook.safe_print()`(降级不抛) + runtime 全部走 `self._say()`;
+新增 `tests/test_encoding.py`(7 项)。**UTF-8 / GBK / 不设编码 三种情况各 214 项全绿。**
+
+**顺带**:项目已从 OneDrive 目录树搬到 **`E:\Code\attention_please`**
+(自启快捷方式已重装指向新路径), 顺带消除了"带人脸的分心截图躺在云同步目录里"这个隐患。
+
 ## 八、目录速查
 
 ```
