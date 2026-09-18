@@ -21,6 +21,7 @@ from datetime import datetime
 from enum import Enum
 
 from .config import Calibration, Config
+from .pose_head import PoseHead
 from .wordlist import TitleVerdict, classify
 
 
@@ -31,6 +32,11 @@ class SignalKind(str, Enum):
     # 离开座位太久。它**不走 enabled_signals 开关**, 由 away_reminder_seconds 控制
     # (0 = 关闭), 因为"人不在"和"人在但分心"是两件不同的事。
     AWAY = "away"
+    # Pose 弱证据: **看不到脸**的时候, 用 Pose 的头部关键点粗判"低头/转头"。
+    # 它**永远不能报警**(上限 0 级 + 结构上强制 record_only), 只进库里当记录。
+    # 存在的理由: 低头写题时人脸覆盖率只有 12-15%, 而这段时间 Pose 还有 80% ——
+    # 没有它, 日报上那段时间只是一句"看不清", 分不出"在写题"还是"人不在"。
+    POSE = "pose"
 
 
 CONFIDENCE: dict[SignalKind, str] = {
@@ -38,6 +44,7 @@ CONFIDENCE: dict[SignalKind, str] = {
     SignalKind.PHONE: "mid",
     SignalKind.DAZE: "low",
     SignalKind.AWAY: "low",      # 上限 1 声 -> 一次离开只会响一次, 不会连环叫
+    SignalKind.POSE: "record",   # 只记录: 见 max_level_for 里的硬性 0
 }
 
 SIGNAL_LABEL: dict[SignalKind, str] = {
@@ -45,6 +52,7 @@ SIGNAL_LABEL: dict[SignalKind, str] = {
     SignalKind.PHONE: "在看手机",
     SignalKind.DAZE: "疑似发呆",
     SignalKind.AWAY: "离开座位太久",
+    SignalKind.POSE: "Pose 弱证据(只记录)",
 }
 
 
@@ -66,6 +74,8 @@ class Observation:
     eye_closed_ratio: float | None = None
     idle_seconds: float = 0.0         # 键鼠空闲时长
     title: str | None = None          # 前台窗口标题
+    # Pose 弱证据(看不到脸时的粗头姿)。None = Pose 弃权。**只记录不报警**。
+    pose_head: PoseHead | None = None
 
 
 @dataclass
@@ -76,8 +86,12 @@ class Policy:
     allow_phone: bool = False     # 该时段"看手机"只记录不报警
     quiet: bool = False           # 安静时段: 不发声, 只弹窗
     block_name: str = ""
-    # 只启用这些信号。M3 试跑先只开 screen(最可信、最不容易误报), 试跑满意再开其它。
-    enabled: frozenset[str] = frozenset({"screen", "phone", "daze"})
+    # 只启用这些信号。默认 = 全开(默认值就该是"不设限"), 真正生效的集合由 runtime
+    # 按 config.toml 的 enabled_signals 填。曾经这里硬写 ["screen","phone","daze"],
+    # 结果是"新增一个信号但默认值里没有它" —— 单测里它永远不触发, 而生产里会触发,
+    # 两边行为不一致。
+    enabled: frozenset[str] = frozenset(
+        {"screen", "phone", "daze", "pose"})
 
 
 @dataclass
@@ -189,6 +203,17 @@ def evaluate(obs: Observation, cfg: Config, cal: Calibration) -> dict[SignalKind
         if daze_active
         else "",
     )
+
+    # --- Pose 弱证据: **只在看不到脸的时候**用它(看得到脸就有更好的证据) ---
+    # 它回答的是"看不清的那段时间里, 你到底在不在、是不是在写题", 而不是"要不要提醒你"。
+    # 所以它永不报警(见 max_level_for), 只进库里当记录, 日报据此把"看不清"拆开。
+    ph = obs.pose_head
+    pose_active = (
+        ph is not None
+        and obs.pitch is None                 # 看得到脸就不用它兜底
+        and (ph.head_down or ph.head_turned)
+    )
+    out[SignalKind.POSE] = SignalEval(pose_active, ph.describe() if pose_active else "")
     return out
 
 
@@ -229,6 +254,10 @@ class FocusStateMachine:
 
     # ---- 对外 ----
     def max_level_for(self, signal: SignalKind) -> int:
+        # Pose 弱证据**永远 0 级** —— 它是模型从身体外推出来的低精度头姿,
+        # 按"误报最烦"的铁律, 它连"一声"都不配有, 只能记录。
+        if signal is SignalKind.POSE:
+            return 0
         r = self.cfg.reminder
         return {
             "high": r.max_level_high,
@@ -242,6 +271,7 @@ class FocusStateMachine:
             SignalKind.SCREEN: d.screen_continuous_seconds,
             SignalKind.PHONE: d.phone_continuous_seconds,
             SignalKind.DAZE: d.daze_continuous_seconds,
+            SignalKind.POSE: d.pose_continuous_seconds,
             SignalKind.AWAY: d.away_reminder_seconds,
         }[signal]
 
@@ -350,7 +380,13 @@ class FocusStateMachine:
         tr = self.tracks[kind]
         rem = self.cfg.reminder
         threshold = self.threshold_for(kind)
-        record_only = policy.allow_phone and kind is SignalKind.PHONE
+        # 两道独立的闸门, 防止 Pose 弱证据意外出声:
+        #   1) max_level_for(POSE) == 0 -> 等级永远到不了 1;
+        #   2) 这里强制 record_only   -> 就算等级算错了, 下面也不会发 Nudge。
+        # 双保险是故意的: 这一条一旦破掉, 就是"看不到脸还替你下结论 + 吵你",
+        # 正好同时踩中两条铁律。
+        record_only = (kind is SignalKind.POSE
+                       or (policy.allow_phone and kind is SignalKind.PHONE))
 
         if ev.active:
             tr.last_active_ts = obs.ts

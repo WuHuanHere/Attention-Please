@@ -133,6 +133,19 @@ def build_report(cfg: Config, store: Store, day: str,
     if st.blind_seconds > 60:
         lines.append(f"- ⚠️ 有 {_hm(st.blind_seconds)} 人脸不在画面里, "
                      f"这段时间只做了窗口检测")
+        # 「看不清」是个很粗的桶: 低头写题(正当)和真的人不在(可疑)全落在里面,
+        # 而低头写题恰恰是人脸覆盖率最低的时候(实测 12-15%)。Pose 弱证据就是用来
+        # 把这个桶拆开的 —— 它只记录不报警, 所以这里能写, 但不能反过来当专注算。
+        if st.pose_weak_seconds > 30:
+            lines.append(f"  - 其中 **{_hm(st.pose_weak_seconds)}** Pose 显示在座且"
+                         f"低头/转头(疑似纸笔模式或侧身, **只记录未报警**)")
+        # 只在"确实还剩下一大段谁也看不到的时间"时才写这一行 ——
+        # 否则会印出"剩下约 0 分钟"这种纯噪声。
+        pose_gap = max(0.0, st.blind_seconds - st.pose_weak_seconds)
+        if pose_gap > 30:
+            lines.append(f"  - 剩下约 {_hm(pose_gap)} 里 Pose 也没能给出姿态"
+                         f"(可能真的不在画面里, 或 Pose 也检不到) —— "
+                         f"这段时间**什么都没看到**, 既不算专注也不算分心")
     if st.wrong_feedback:
         lines.append(f"- 你标记了 {st.wrong_feedback} 次误判 —— 攒够样本后按日志调阈值"
                      f"(程序不自动调参)")

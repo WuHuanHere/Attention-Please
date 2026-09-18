@@ -54,6 +54,7 @@ class DayStats:
     away_seconds: float = 0.0
     pause_seconds: float = 0.0
     blind_seconds: float = 0.0        # 看不清(人脸覆盖率不足)的时间
+    pose_weak_seconds: float = 0.0    # 看不清的时间里, Pose 弱证据显示"低头/转头"的时长
     nudges: int = 0
     away_nudges: int = 0              # "离开太久"的提醒次数(单独统计, 不算分心提醒)
     episodes: int = 0
@@ -145,6 +146,12 @@ class Store:
                     # "离开太久"的分集不是分心 —— 那段时间已经算进 away_seconds 了,
                     # 再计一次会重复扣减有效专注。
                     continue
+                if signal == "pose":
+                    # Pose 弱证据是**记录**, 不是判定: 它是"看不到脸时 Pose 觉得你在低头/
+                    # 转头", 精度低到连一声提醒都不配(见 signals.max_level_for)。
+                    # 算进分心会让"低头写题"直接变成"分心", 那正是最烦的误报。
+                    st.pose_weak_seconds += duration
+                    continue
                 st.episodes += 1
                 st.distract_seconds += duration
             elif kind == "nudge":
@@ -188,8 +195,15 @@ class Store:
         return st
 
     def busiest_distraction_hours(self, day: str, top: int = 3) -> list[tuple[int, float]]:
+        """最常分心的时段。
+
+        **必须排除 away 与 pose**: 这两类分集进了 event 表, 但它们不是分心 ——
+        away 的时间已经在 away_seconds 里, pose 是"看不到脸时的弱证据记录"。
+        不排除的话"最常分心的时段"会把离开座位和低头写题算进去(实测口径 bug)。
+        """
         cur = self.conn.execute(
-            "SELECT at, duration FROM event WHERE day = ? AND kind = 'episode_end'", (day,))
+            "SELECT at, duration FROM event WHERE day = ? AND kind = 'episode_end'"
+            " AND (signal IS NULL OR signal NOT IN ('away', 'pose'))", (day,))
         buckets: dict[int, float] = {}
         for at, duration in cur.fetchall():
             hour = datetime.fromisoformat(at).hour

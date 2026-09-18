@@ -33,6 +33,7 @@ import cv2
 import numpy as np
 
 from .config import Calibration
+from .pose_head import PoseHead, PoseHeadEstimator
 
 STABILITY_WINDOW_SECONDS = 20.0  # "头没动"的观察窗(短窗 + 长连续时长 = 真发呆)
 BLINK_WINDOW_SECONDS = 60.0      # 眨眼率统计窗
@@ -56,6 +57,8 @@ class FrameFeatures:
     eye_closed_ratio: float | None = None
     blink_event: bool = False
     head_box_px: int = 0          # 头部框高度(像素): 判断"距离够不够"的唯一硬指标
+    # Pose 弱证据(看不到脸时的粗头姿)。None = 弃权。**只能记录, 不能报警**。
+    pose_head: PoseHead | None = None
     pose_landmarks: object = None
     face_landmarks: object = None
 
@@ -166,7 +169,8 @@ class FrameAnalyzer:
                  calibration: Calibration | None = None,
                  stability_window: float = STABILITY_WINDOW_SECONDS,
                  blink_window: float = BLINK_WINDOW_SECONDS,
-                 with_blendshapes: bool = True):
+                 with_blendshapes: bool = True,
+                 pose_head_kwargs: dict | None = None):
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
 
@@ -207,6 +211,9 @@ class FrameAnalyzer:
         self._eye_closed: deque[tuple[float, bool]] = deque()
         self._blink_prev = False
         self._blink_names: dict[str, int] | None = None
+        # Pose 弱证据: 看不到脸时的粗头姿。纯逻辑, 见 pose_head.py —— 它**只记录不报警**,
+        # 是"低头写题时人脸覆盖率只有 12-15%"这个死角的兜底(实测那段时间 Pose 还有 80%)。
+        self.pose_head_estimator = PoseHeadEstimator(**(pose_head_kwargs or {}))
 
     # ---- 主入口 ----
     def analyze(self, frame_bgr, ts_ms: int, now: float | None = None) -> FrameFeatures:
@@ -298,6 +305,13 @@ class FrameAnalyzer:
                     feats.blink_rate = len(self._blinks) * 60.0 / span
                     feats.eye_closed_ratio = (sum(1 for _, c in self._eye_closed if c)
                                               / len(self._eye_closed))
+
+        # --- 6) Pose 弱证据(看不到脸时的粗头姿) ---
+        # 必须放在人脸之后: 它要用 face_pitch 来判断"这一帧算不算直立基准样本",
+        # 而直立基准**只吃"人脸确认头没低"的帧** —— 这样长时间低头不会把基准拖走。
+        # 注意用 frame_bgr.shape: Pose 关键点是归一化坐标, 与喂进去的缩略图无关。
+        feats.pose_head = self.pose_head_estimator.observe(
+            now, feats.pose_landmarks, frame_bgr.shape, face_pitch=feats.pitch)
         return feats
 
     def close(self) -> None:

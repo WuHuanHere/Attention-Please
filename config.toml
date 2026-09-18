@@ -111,9 +111,10 @@ enabled = true
 ranges = ["18:00-24:00"]
 
 [detection]
-# 启用哪些信号。screen=切到娱乐窗口; phone=看手机(头右偏, 手机在右手边); daze=发呆(暂不建议开)
-# 2026-09-18 中午起: screen + phone。保存后一分钟内热重载生效。
-enabled_signals = ["screen", "phone"]
+# 启用哪些信号。screen=切到娱乐窗口; phone=看手机(头右偏, 手机在右手边);
+# pose=Pose 弱证据(**只记录不报警**); daze=发呆(依赖人脸, 暂不建议开)
+# 2026-09-18 起: screen + phone + pose。保存后一分钟内热重载生效。
+enabled_signals = ["screen", "phone", "pose"]
 # 低于该置信度的判定一律只记录不报警(宁可漏报, 你说了误报最烦)
 # 切到娱乐窗口: 连续多少秒才提醒
 screen_continuous_seconds = 10
@@ -127,6 +128,19 @@ daze_yaw_std_deg = 3.0
 daze_pitch_std_deg = 3.0
 # 发呆的眨眼判据: 相对校准基线的眨眼率下降比例
 daze_blink_drop_ratio = 0.5
+# --- Pose 弱证据(看不到脸时的粗头姿) ---
+# **它永远不会提醒你**: 级别上限硬编码为 0, 而且结构上强制"只记录"。
+# 用处是把日报里的「看不清」拆开 —— 低头写题时人脸覆盖率只有 12-15%, 那段时间
+# 原本只是一句"看不清", 分不出"在写题"还是"人不在"。
+# 实测依据: 人脸覆盖率 <60% 的 54 个分钟里, Pose 仍有 80.6% 的帧在。
+# 连续多少秒才算一段(免得单帧抖动造出一堆碎片分集)
+pose_continuous_seconds = 10
+# 判定余量 = max(pose_head_min_margin, k × 短窗离散度)。调大 = 更不容易判成低头。
+pose_head_down_k = 1.5
+pose_head_turn_k = 1.5
+# ⚠️ 下面这个 0.08 目前只由**一个**真人低头样本支撑(probe_out/posenoise.md),
+# 还没做过真人实测标定, 等标定完再定稿。
+pose_head_min_margin = 0.08
 # 离开: Pose 丢失多少秒后开始记为"离开"(只记录不报警)
 away_seconds = 90
 # 离开**太久**才提醒一次(秒)。0 = 关闭。

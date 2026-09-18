@@ -165,14 +165,24 @@ class Detection:
     daze_yaw_std_deg: float = 3.0
     daze_pitch_std_deg: float = 3.0
     daze_blink_drop_ratio: float = 0.5
+    # --- Pose 弱证据(看不到脸时的粗头姿, **只记录不报警**) ---
+    # 连续这么多秒才算一段, 免得单帧抖动造出一堆碎片分集。
+    pose_continuous_seconds: float = 10.0
+    # 判定余量 = max(pose_head_min_margin, k * 短窗离散度)。见 pose_head.py。
+    pose_head_down_k: float = 1.5
+    pose_head_turn_k: float = 1.5
+    # ⚠️ 这个默认值目前只由**一个**真人低头样本支撑(probe_out/posenoise.md),
+    # 必须等真人实测标定后再定稿。调大 = 更不容易判成低头(更少误报)。
+    pose_head_min_margin: float = 0.08
     away_seconds: float = 90.0
     # 离开多久才提醒一次(0 = 关闭)。级别上限是"低"(1 声), 所以一次离开只提醒一次;
     # 安静时段自动变成只弹窗。默认 15 分钟 —— 上个厕所不该被念, 跑去躺着就该。
     away_reminder_seconds: float = 900.0
     resume_grace_seconds: float = 20.0
-    # 启用哪些信号。M3 试跑只开 screen(最可信), 试跑满意后再加 phone/daze。
+    # 启用哪些信号。screen=窗口标题; phone=头右偏; pose=Pose 弱证据(只记录不报警);
+    # daze=发呆(依赖人脸, 而低头写题时人脸覆盖率只有 12-15% -> 暂不建议开)。
     enabled_signals: list[str] = field(
-        default_factory=lambda: ["screen", "phone", "daze"])
+        default_factory=lambda: ["screen", "phone", "pose"])
 
 
 @dataclass
@@ -296,11 +306,15 @@ class Config:
                 daze_yaw_std_deg=float(d.get("daze_yaw_std_deg", 3.0)),
                 daze_pitch_std_deg=float(d.get("daze_pitch_std_deg", 3.0)),
                 daze_blink_drop_ratio=float(d.get("daze_blink_drop_ratio", 0.5)),
+                pose_continuous_seconds=float(d.get("pose_continuous_seconds", 10)),
+                pose_head_down_k=float(d.get("pose_head_down_k", 1.5)),
+                pose_head_turn_k=float(d.get("pose_head_turn_k", 1.5)),
+                pose_head_min_margin=float(d.get("pose_head_min_margin", 0.08)),
                 away_seconds=float(d.get("away_seconds", 90)),
                 away_reminder_seconds=float(d.get("away_reminder_seconds", 900)),
                 resume_grace_seconds=float(d.get("resume_grace_seconds", 20)),
                 enabled_signals=[str(x) for x in
-                                 d.get("enabled_signals", ["screen", "phone", "daze"])],
+                                 d.get("enabled_signals", ["screen", "phone", "pose"])],
             ),
             wordlists=Wordlists(
                 whitelist=list(wl.get("words", [])),

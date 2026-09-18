@@ -271,9 +271,19 @@ class Runtime:
             self._say("加载 MediaPipe 模型 ...")
             self.analyzer = FrameAnalyzer(self.cfg.models_dir / "pose_landmarker_lite.task",
                                          self.cfg.models_dir / "face_landmarker.task",
-                                         calibration=self.cal)
+                                         calibration=self.cal,
+                                         pose_head_kwargs=self._pose_head_kwargs())
             self._say("模型就绪。")
         return True
+
+    def _pose_head_kwargs(self) -> dict:
+        d = self.cfg.detection
+        return {
+            "down_k": d.pose_head_down_k,
+            "turn_k": d.pose_head_turn_k,
+            "min_margin": d.pose_head_min_margin,
+            "book_pitch_deg": self.cal.book_pitch_deg,
+        }
 
     def _release_camera(self) -> None:
         if self.cap is not None:
@@ -356,6 +366,10 @@ class Runtime:
         if not policy.judging:
             if self.cap is not None and mono - self.idle_since > CAMERA_RELEASE_AFTER:
                 self._release_camera()
+            # Pose 弱证据的基准是"你最近的样子"。待机/休息久了它就过期了 ——
+            # 拿一小时前(甚至午休前)的姿势当基准, 等于在猜。清掉, 恢复判定后重新学。
+            if self.analyzer is not None:
+                self.analyzer.pose_head_estimator.reset()
             self.sm.update(Observation(ts=mono, at=now), Policy(judging=False,
                                                                enabled=enabled))
             return
@@ -388,6 +402,7 @@ class Runtime:
             blink_rate=feats.blink_rate, eye_closed_ratio=feats.eye_closed_ratio,
             idle_seconds=input_activity.idle_seconds(),
             title=foreground.foreground_title(),
+            pose_head=feats.pose_head,
         )
         self.dispatch(self.sm.update(obs, policy), frame)
 
@@ -404,10 +419,14 @@ class Runtime:
             msg = (f"[{now:%H:%M:%S}] 判定中·{policy.block_name} | "
                    f"{rate:.1f} Hz | 人脸 {face_pct:.0f}%"
                    + ("  ⚠️ 看不清" if face_pct < 50 else ""))
+            # Pose 弱证据单独写, 不混进下面的"分集中"里 —— 它只记录、不算分心,
+            # 写成"分集中"会让人以为它在报警。看不清的时候它才是主角。
+            if feats.pose_head is not None:
+                msg += f" | Pose:{feats.pose_head.posture}"
             snap = self.sm.snapshot(mono)
             parts = []
             for key, val in snap.items():
-                if not isinstance(val, dict):
+                if not isinstance(val, dict) or key == SignalKind.POSE.value:
                     continue
                 bits = []
                 if val.get("in_episode"):
@@ -568,6 +587,10 @@ class Runtime:
         self.sm.cal = new_cal
         if self.analyzer is not None:
             self.analyzer.cal = new_cal
+            # Pose 弱证据的阈值也要跟着热重载, 否则改了 config.toml 却只有重启才生效
+            est = self.analyzer.pose_head_estimator
+            for key, val in self._pose_head_kwargs().items():
+                setattr(est, key, val)
         self._say(f"[{now:%H:%M:%S}] 配置已热重载(启用信号: {new_cfg.detection.enabled_signals})")
 
     # ---- 每日任务 ----
