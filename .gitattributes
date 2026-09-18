@@ -1,0 +1,10 @@
+# 行尾统一为 LF:这个项目是纯 Windows 使用,但文件本来就是 LF 写的,
+# 不锁住的话 git 每次 checkout 都会转成 CRLF, 产生满屏警告和假 diff。
+* text=auto eol=lf
+
+# 二进制文件别当文本处理
+*.jpg binary
+*.png binary
+*.task binary
+*.sqlite3 binary
+*.dmp binary
