@@ -24,7 +24,7 @@ from pathlib import Path
 from . import capture, foreground, input_activity
 from .camera import CameraInfo, grab_frame, open_camera, set_buffer_size
 from .config import Calibration, Config
-from .logbook import Logbook, install_streams
+from .logbook import Logbook, install_streams, safe_print
 from .notifier import LEVEL_LABEL, Notifier
 from .perception import FrameAnalyzer
 from .report import write_report
@@ -168,7 +168,7 @@ class Runtime:
     def pause(self, reason: str, at: datetime) -> None:
         reason = (reason or "").strip()
         if not reason:
-            print("暂停被拒: 理由不能为空(这就是「暂停的代价」)")
+            self._say("暂停被拒: 理由不能为空(这就是「暂停的代价」)")
             return
         with self._lock:
             if self.paused:
@@ -176,7 +176,7 @@ class Runtime:
             self.paused = True
             self.pause_started = at
             self.pause_reason = reason
-        print(f"[{at:%H:%M:%S}] ⏸ 暂停监控:{reason}(暂停期间不判定, 时长单列)")
+        self._say(f"[{at:%H:%M:%S}] ⏸ 暂停监控:{reason}(暂停期间不判定, 时长单列)")
         self._log("pause_start", at=at, detail=reason)
         if self.analyzer is not None:
             self.analyzer.close_async()      # 暂停就把模型放掉, 别占着摄像头
@@ -194,13 +194,13 @@ class Runtime:
             self.pause_started = None
             self.pause_reason = ""
         self.counters.pause_seconds += duration
-        print(f"[{at:%H:%M:%S}] ▶ 恢复监控(暂停 {duration / 60:.1f} 分钟:{reason})")
+        self._say(f"[{at:%H:%M:%S}] ▶ 恢复监控(暂停 {duration / 60:.1f} 分钟:{reason})")
         self._log("pause_end", at=at, duration=duration, detail=reason)
 
     def start_manual_session(self, minutes: int = 60) -> None:
         with self._lock:
             self.manual_until = datetime.now() + timedelta(minutes=minutes)
-        print(f"手动开始学习 {minutes} 分钟(时间表外的加练也会被记录)")
+        self._say(f"手动开始学习 {minutes} 分钟(时间表外的加练也会被记录)")
 
     def stop(self) -> None:
         self.running = False
@@ -252,7 +252,7 @@ class Runtime:
             if self.cam_fail_since is None:
                 self.cam_fail_since = datetime.now()
                 self._log("camera_busy", detail="摄像头打不开(被会议软件/OBS 占用?)")
-                print(f"⚠️ 摄像头打不开 —— 监控暂停, {CAMERA_RETRY_SECONDS} 秒后重试。"
+                self._say(f"⚠️ 摄像头打不开 —— 监控暂停, {CAMERA_RETRY_SECONDS} 秒后重试。"
                       f"这段时间会记进日报的'漏检'。")
             self.cam_next_retry = now + CAMERA_RETRY_SECONDS
             return False
@@ -265,21 +265,21 @@ class Runtime:
         if self.cam_fail_since is not None:
             dur = (datetime.now() - self.cam_fail_since).total_seconds()
             self._log("camera_busy_end", duration=dur)
-            print(f"✅ 摄像头恢复(此前漏检 {dur / 60:.1f} 分钟)")
+            self._say(f"✅ 摄像头恢复(此前漏检 {dur / 60:.1f} 分钟)")
             self.cam_fail_since = None
         if self.analyzer is None:
-            print("加载 MediaPipe 模型 ...")
+            self._say("加载 MediaPipe 模型 ...")
             self.analyzer = FrameAnalyzer(self.cfg.models_dir / "pose_landmarker_lite.task",
                                          self.cfg.models_dir / "face_landmarker.task",
                                          calibration=self.cal)
-            print("模型就绪。")
+            self._say("模型就绪。")
         return True
 
     def _release_camera(self) -> None:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-            print("(长时间不在判定区间, 已释放摄像头)")
+            self._say("(长时间不在判定区间, 已释放摄像头)")
 
     # ------------------------------------------------------------------
     # 日志
@@ -291,6 +291,14 @@ class Runtime:
         self.store.event(kind, at=at, signal=signal, level=level, duration=duration,
                          evidence=evidence, block=block, detail=detail)
 
+    def _say(self, message: str) -> None:
+        """控制台输出: 编码不兼容时降级, 绝不抛异常。
+
+        这条不是洁癖: 中文 Windows 控制台是 GBK, 而提醒文案里有 emoji ——
+        print 抛异常会把同一段代码里后面的响铃/弹窗一起带走(实测踩到)。
+        """
+        safe_print(message)
+
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
@@ -301,13 +309,13 @@ class Runtime:
                        f"{self.cfg.general.camera_width}x{self.cfg.general.camera_height}, "
                        f"{self.cfg.general.tick_hz} Hz, "
                        f"启用信号 {self.cfg.detection.enabled_signals}")
-        print("=" * 72)
-        print("attention_please 监控中。Ctrl+C 退出。")
-        print(f"  时间表内自动判定, 当前启用信号: {self.cfg.detection.enabled_signals}")
-        print(f"  摄像头: 设备 {self.cfg.general.camera_index} @ "
+        self._say("=" * 72)
+        self._say("attention_please 监控中。Ctrl+C 退出。")
+        self._say(f"  时间表内自动判定, 当前启用信号: {self.cfg.detection.enabled_signals}")
+        self._say(f"  摄像头: 设备 {self.cfg.general.camera_index} @ "
               f"{self.cfg.general.camera_width}x{self.cfg.general.camera_height}, "
               f"检测频率 {self.cfg.general.tick_hz} Hz")
-        print("=" * 72)
+        self._say("=" * 72)
         interval = 1.0 / max(0.5, self.cfg.general.tick_hz)
         next_tick = time.monotonic()
         self._summary_at = next_tick
@@ -321,7 +329,7 @@ class Runtime:
                     break
                 except Exception as exc:  # noqa: BLE001 - 单帧异常绝不能拖垮监控
                     self.log.exception("tick", exc)
-                    print(f"⚠️ 这一帧出错(已跳过): {type(exc).__name__}: {exc}")
+                    self._say(f"⚠️ 这一帧出错(已跳过): {type(exc).__name__}: {exc}")
                 next_tick += interval
                 slack = next_tick - time.monotonic()
                 if slack > 0:
@@ -410,7 +418,7 @@ class Runtime:
                     parts.append(f"{key}:{'/'.join(bits)}")
             if parts:
                 msg += " | " + " ".join(parts)
-            print(msg)
+            self._say(msg)
             self._status_at = mono
             self._tick_count = 0
             self._face_count = 0
@@ -435,7 +443,7 @@ class Runtime:
                 # 记录写在提醒之后, 提醒一抛异常, 连"它本来想提醒"这件事都没留下。
                 self._log("nudge", signal=act.signal.value, level=act.level,
                           evidence=act.evidence, block=act.block_name, detail=title)
-                print(f"[{act.at:%H:%M:%S}] 🔔 提醒 L{act.level}"
+                self._say(f"[{act.at:%H:%M:%S}] 🔔 提醒 L{act.level}"
                       f"({LEVEL_LABEL.get(act.level, '')}) "
                       f"{SIGNAL_LABEL[act.signal]}: {act.evidence}"
                       + (f" | 当前窗口: {title[:60]}" if title else ""))
@@ -459,7 +467,7 @@ class Runtime:
                     except Exception as exc:  # noqa: BLE001
                         self.log.exception("ui.show", exc)
             elif isinstance(act, EpisodeStart):
-                print(f"[{act.at:%H:%M:%S}] ▶ 开始分心"
+                self._say(f"[{act.at:%H:%M:%S}] ▶ 开始分心"
                       f"{'(只记录)' if act.record_only else ''}: {act.evidence}")
                 self._log("episode_start", signal=act.signal.value,
                           evidence=act.evidence, detail="record_only" if act.record_only else None)
@@ -467,17 +475,17 @@ class Runtime:
             elif isinstance(act, EpisodeEnd):
                 self.counters.episodes += 1
                 self.counters.distract_seconds += act.duration
-                print(f"[{act.at:%H:%M:%S}] ⏹ 分心结束, 持续 {act.duration:.0f} 秒"
+                self._say(f"[{act.at:%H:%M:%S}] ⏹ 分心结束, 持续 {act.duration:.0f} 秒"
                       f"(最高 L{act.max_level})")
                 self._log("episode_end", signal=act.signal.value, level=act.max_level,
                           duration=act.duration, evidence=act.evidence)
             elif isinstance(act, AwayChange):
                 if act.away:
-                    print(f"[{act.at:%H:%M:%S}] 💤 离开座位(只记录, 不提醒)")
+                    self._say(f"[{act.at:%H:%M:%S}] 💤 离开座位(只记录, 不提醒)")
                     self._log("away_start")
                 else:
                     self.counters.away_seconds += act.duration
-                    print(f"[{act.at:%H:%M:%S}] 👋 回到座位(离开 {act.duration / 60:.1f} 分钟)")
+                    self._say(f"[{act.at:%H:%M:%S}] 👋 回到座位(离开 {act.duration / 60:.1f} 分钟)")
                     self._log("away_end", duration=act.duration)
 
     def _capture(self, act: EpisodeStart, frame) -> None:
@@ -494,7 +502,7 @@ class Runtime:
             note=act.signal.value)
         if path is not None:
             self._log("capture", signal=act.signal.value, detail=str(path))
-            print(f"   已存证据图: {path.name}")
+            self._say(f"   已存证据图: {path.name}")
 
     # ---- 弹窗策略 ----
     def _should_popup(self, act: Nudge) -> bool:
@@ -519,13 +527,13 @@ class Runtime:
                     continue
                 self.sm.report_wrong(sk, mono)
                 minutes = self.cfg.reminder.wrong_feedback_mute_seconds // 60
-                print(f"   判定错了 -> {SIGNAL_LABEL[sk]} 静默 {minutes} 分钟"
+                self._say(f"   判定错了 -> {SIGNAL_LABEL[sk]} 静默 {minutes} 分钟"
                       f"(已入库; 不自动调参, 攒够样本后人工调阈值)")
                 self._log("wrong", signal=value)
             elif kind == "reason":
                 self.pause(value, datetime.now())
             elif kind == "reason_cancelled":
-                print("   已取消暂停(没写理由就不给暂停)")
+                self._say("   已取消暂停(没写理由就不给暂停)")
             else:
                 self._log("alert_dismissed", signal=value)
 
@@ -548,7 +556,7 @@ class Runtime:
             new_cfg = Config.load(self.cfg.path)
             new_cal = Calibration.load()
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️ 配置重载失败(继续用旧的): {exc}")
+            self._say(f"⚠️ 配置重载失败(继续用旧的): {exc}")
             return
         # 分辨率/设备改变需要重开摄像头
         if (new_cfg.general.camera_index != self.cfg.general.camera_index
@@ -560,7 +568,7 @@ class Runtime:
         self.sm.cal = new_cal
         if self.analyzer is not None:
             self.analyzer.cal = new_cal
-        print(f"[{now:%H:%M:%S}] 配置已热重载(启用信号: {new_cfg.detection.enabled_signals})")
+        self._say(f"[{now:%H:%M:%S}] 配置已热重载(启用信号: {new_cfg.detection.enabled_signals})")
 
     # ---- 每日任务 ----
     def _daily_jobs(self, now: datetime) -> None:
@@ -571,10 +579,10 @@ class Runtime:
                 removed = capture.cleanup(self.cfg.capture_dir,
                                           self.cfg.privacy.capture_retention_days)
                 if removed:
-                    print(f"清理了 {removed} 张超过 "
+                    self._say(f"清理了 {removed} 张超过 "
                           f"{self.cfg.privacy.capture_retention_days} 天的截图")
             except Exception as exc:  # noqa: BLE001
-                print(f"截图清理失败(忽略): {exc}")
+                self._say(f"截图清理失败(忽略): {exc}")
 
         if not self.cfg.report.daily_report or self._report_day == day:
             return
@@ -583,23 +591,23 @@ class Runtime:
         self._report_day = day
         try:
             path = write_report(self.cfg, self.store, day)
-            print(f"[{now:%H:%M:%S}] 📄 今日日报已生成: {path}")
+            self._say(f"[{now:%H:%M:%S}] 📄 今日日报已生成: {path}")
             self._log("report", detail=str(path))
             self._print_summary(now)
         except Exception as exc:  # noqa: BLE001
-            print(f"日报生成失败(忽略): {type(exc).__name__}: {exc}")
+            self._say(f"日报生成失败(忽略): {type(exc).__name__}: {exc}")
 
     # ---- 摘要 ----
     def _print_summary(self, now: datetime) -> None:
         st = self.store.day_stats(now.date().isoformat(),
                                   tick_hz=self.cfg.general.tick_hz)
-        print(f"[{now:%H:%M:%S}] —— 今日进度 ——")
-        print(f"    有效专注 {st.focus_seconds / 3600:.2f} h | 分心 {st.distract_seconds / 60:.1f} min "
+        self._say(f"[{now:%H:%M:%S}] —— 今日进度 ——")
+        self._say(f"    有效专注 {st.focus_seconds / 3600:.2f} h | 分心 {st.distract_seconds / 60:.1f} min "
               f"({st.episodes} 次) | 提醒 {st.nudges} 次")
-        print(f"    离开 {st.away_seconds / 60:.1f} min | 看不清 {st.blind_seconds / 60:.1f} min "
+        self._say(f"    离开 {st.away_seconds / 60:.1f} min | 看不清 {st.blind_seconds / 60:.1f} min "
               f"| 人脸覆盖率 {st.coverage * 100:.0f}%")
         if st.camera_busy_seconds:
-            print(f"    ⚠️ 因摄像头占用漏检 {st.camera_busy_seconds / 60:.1f} min")
+            self._say(f"    ⚠️ 因摄像头占用漏检 {st.camera_busy_seconds / 60:.1f} min")
 
     def close(self) -> None:
         """释放资源。正常退出和测试都走这里, 别只关一半。
@@ -617,12 +625,12 @@ class Runtime:
             pass
 
     def shutdown(self) -> None:
-        print("\n正在退出 ...")
+        self._say("\n正在退出 ...")
         if self.cap is not None:
             self.cap.release()
             self.cap = None
         if self.analyzer is not None:
             self.analyzer.close_async()   # 同步 close 要 40 多秒, 必须异步
         self.store.flush()
-        print("已退出。")
+        self._say("已退出。")
         self.close()

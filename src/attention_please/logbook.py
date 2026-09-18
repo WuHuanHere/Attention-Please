@@ -141,3 +141,28 @@ class Logbook:
                 except Exception:  # noqa: BLE001
                     pass
                 self._fh = None
+
+
+def safe_print(*args, **kwargs) -> None:
+    """打印, 但**绝不因为控制台编码而抛异常**。
+
+    中文 Windows 控制台默认 GBK, 而我们的提醒文案里有 emoji(🔔 ⏹ 💤 👋)。
+    print 一旦抛 UnicodeEncodeError, 调用它的那段代码就会中断 ——
+    实测后果是"记账了但没响铃也没弹窗"(dispatch 里 print 排在响铃之前)。
+    这里把编不出来的字符降级成 '?', 保证输出永远成功。
+    """
+    import sys as _sys
+
+    try:
+        print(*args, **kwargs)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:  # noqa: BLE001 - 输出失败永远不该影响主流程
+        return
+    try:
+        body = " ".join(str(a) for a in args)
+        enc = getattr(_sys.stdout, "encoding", None) or "utf-8"
+        print(body.encode(enc, "replace").decode(enc, "replace"), **kwargs)
+    except Exception:  # noqa: BLE001
+        pass

@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 
+from .logbook import safe_print
+
 # (频率 Hz, 时长 ms); 频率 0 表示静音间隔
 LEVEL_PATTERNS: dict[int, list[tuple[int, int]]] = {
     1: [(880, 130)],
@@ -41,7 +43,7 @@ class Notifier:
         """非阻塞播放。sound=False(安静时段)时只打印, 不发声。"""
         pattern = LEVEL_PATTERNS.get(level, LEVEL_PATTERNS[1])
         if not sound:
-            print(f"   (安静时段: 不发声, 只记录) {label}")
+            safe_print(f"   (安静时段: 不发声, 只记录) {label}")
             return
         threading.Thread(target=self._play, args=(pattern,), daemon=True).start()
 
@@ -69,6 +71,6 @@ class Notifier:
 if __name__ == "__main__":
     n = Notifier()
     for lvl in (1, 2, 3):
-        print(f"level {lvl}: {LEVEL_LABEL[lvl]}")
+        safe_print(f"level {lvl}: {LEVEL_LABEL[lvl]}")
         n.buzz(lvl)
         time.sleep(3)
