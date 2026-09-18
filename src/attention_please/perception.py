@@ -307,11 +307,14 @@ class FrameAnalyzer:
                                               / len(self._eye_closed))
 
         # --- 6) Pose 弱证据(看不到脸时的粗头姿) ---
-        # 必须放在人脸之后: 它要用 face_pitch 来判断"这一帧算不算直立基准样本",
-        # 而直立基准**只吃"人脸确认头没低"的帧** —— 这样长时间低头不会把基准拖走。
+        # 必须放在人脸之后: 它要用 face_pitch / face_yaw 判断"这一帧算不算直立基准样本",
+        # 而直立基准**只吃"人脸确认头没低、也没转"的帧** —— 这样长时间低头(或转头看手机)
+        # 不会把基准拖走。⚠️ 只按 pitch 拦是不够的: 看手机时头是抬着的, 那一整段都会被
+        # 当成直立样本, 把基准的 side 下沿拖到 -0.5(2026-09-18 真人标定实测)。
         # 注意用 frame_bgr.shape: Pose 关键点是归一化坐标, 与喂进去的缩略图无关。
         feats.pose_head = self.pose_head_estimator.observe(
-            now, feats.pose_landmarks, frame_bgr.shape, face_pitch=feats.pitch)
+            now, feats.pose_landmarks, frame_bgr.shape,
+            face_pitch=feats.pitch, face_yaw=feats.yaw)
         return feats
 
     def close(self) -> None:

@@ -138,8 +138,9 @@ pose_continuous_seconds = 10
 # 判定余量 = max(pose_head_min_margin, k × 短窗离散度)。调大 = 更不容易判成低头。
 pose_head_down_k = 1.5
 pose_head_turn_k = 1.5
-# ⚠️ 下面这个 0.08 目前只由**一个**真人低头样本支撑(probe_out/posenoise.md),
-# 还没做过真人实测标定, 等标定完再定稿。
+# 2026-09-18 真人标定定稿(5 段 3740 帧, 见 probe_out/poselabel.md):
+# 直立 bow 下沿 0.491 / 低头 bow 上沿 0.343 -> 间隔 0.149, 取一半 ≈ 0.074。
+# 0.08 让阈值正好落在两者中间; 回放实测: 低头检出 98%、转头检出 98%、直立误报 0%。
 pose_head_min_margin = 0.08
 # 离开: Pose 丢失多少秒后开始记为"离开"(只记录不报警)
 away_seconds = 90

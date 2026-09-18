@@ -171,8 +171,11 @@ class Detection:
     # 判定余量 = max(pose_head_min_margin, k * 短窗离散度)。见 pose_head.py。
     pose_head_down_k: float = 1.5
     pose_head_turn_k: float = 1.5
-    # ⚠️ 这个默认值目前只由**一个**真人低头样本支撑(probe_out/posenoise.md),
-    # 必须等真人实测标定后再定稿。调大 = 更不容易判成低头(更少误报)。
+    # 2026-09-18 真人标定定稿(5 段 / 3740 帧, 见 probe_out/poselabel.md):
+    #   直立 bow 下沿(p10) 0.491, 最小 0.459;低头 bow 上沿(p90) 0.343, 最大 0.376
+    #   -> 间隔 0.149, 取一半 ≈ 0.074。0.08 让阈值落在 0.343 与 0.459 正中间。
+    # 回放实测(probe_out/replay_poselabel.py): 低头检出 98% / 转头检出 98% / 直立误报 0%。
+    # 调大 = 更不容易判成低头(更少误报, 更多漏报)。
     pose_head_min_margin: float = 0.08
     away_seconds: float = 90.0
     # 离开多久才提醒一次(0 = 关闭)。级别上限是"低"(1 声), 所以一次离开只提醒一次;

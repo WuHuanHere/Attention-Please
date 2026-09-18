@@ -283,6 +283,9 @@ class Runtime:
             "turn_k": d.pose_head_turn_k,
             "min_margin": d.pose_head_min_margin,
             "book_pitch_deg": self.cal.book_pitch_deg,
+            # "头朝前"的判据用"看手机"的 yaw 阈值 —— 超过它就认为头转了,
+            # 那样的帧不许进直立基准(否则转头会把自己的基准拖歪)。
+            "reference_max_yaw_deg": self.cal.phone_yaw_deg,
         }
 
     def _release_camera(self) -> None:

@@ -78,19 +78,25 @@ def geom(*, bow: float = 0.42, side: float = 0.0, shoulder_w: float = 256.0,
 
 def feed(est: PoseHeadEstimator, start: float, seconds: float, *,
          bow: float = 0.42, side: float = 0.0, shoulder_w: float = 256.0,
-         face_pitch: float | None = 5.0, hz: float = HZ,
-         geom_fn=None, pitch_fn=None):
-    """按 hz 喂 seconds 秒, 返回 (最后一次结论, 结束时刻)。"""
+         face_pitch: float | None = 5.0, face_yaw: float | None = 0.0, hz: float = HZ,
+         geom_fn=None, pitch_fn=None, yaw_fn=None):
+    """按 hz 喂 seconds 秒, 返回 (最后一次结论, 结束时刻)。
+
+    `face_yaw` 默认 0.0 = 头朝前。**不能省**: 直立基准要求"头没低、也没转",
+    少了 yaw 就一个样本都学不到。
+    """
     outs, ts = feed_outs(est, start, seconds, bow=bow, side=side,
-                         shoulder_w=shoulder_w, face_pitch=face_pitch, hz=hz,
-                         geom_fn=geom_fn, pitch_fn=pitch_fn)
+                         shoulder_w=shoulder_w, face_pitch=face_pitch,
+                         face_yaw=face_yaw, hz=hz,
+                         geom_fn=geom_fn, pitch_fn=pitch_fn, yaw_fn=yaw_fn)
     return (outs[-1] if outs else None), ts
 
 
 def feed_outs(est: PoseHeadEstimator, start: float, seconds: float, *,
               bow: float = 0.42, side: float = 0.0, shoulder_w: float = 256.0,
-              face_pitch: float | None = 5.0, hz: float = HZ,
-              geom_fn=None, pitch_fn=None) -> tuple[list, float]:
+              face_pitch: float | None = 5.0, face_yaw: float | None = 0.0,
+              hz: float = HZ,
+              geom_fn=None, pitch_fn=None, yaw_fn=None) -> tuple[list, float]:
     """按 hz 喂 seconds 秒, 返回 (每一帧的结论列表, 结束时刻)。"""
     outs = []
     ts = start
@@ -98,7 +104,8 @@ def feed_outs(est: PoseHeadEstimator, start: float, seconds: float, *,
         ts += 1.0 / hz
         g = geom_fn(i, ts) if geom_fn else geom(bow=bow, side=side, shoulder_w=shoulder_w)
         p = pitch_fn(i, ts) if pitch_fn else face_pitch
-        outs.append(est.observe_geometry(ts, g, face_pitch=p))
+        y = yaw_fn(i, ts) if yaw_fn else face_yaw
+        outs.append(est.observe_geometry(ts, g, face_pitch=p, face_yaw=y))
     return outs, ts
 
 
@@ -298,9 +305,53 @@ class TestReferenceIsNotPolluted(unittest.TestCase):
     def test_face_lost_frames_do_not_teach_the_reference(self):
         """看不到脸的时候 Pose 说什么都不能当基准 —— 否则就成了自证。"""
         est = PoseHeadEstimator()
-        out, ts = feed(est, 0.0, 120.0, bow=0.10, face_pitch=None)
+        out, ts = feed(est, 0.0, 120.0, bow=0.10, face_pitch=None, face_yaw=None)
         self.assertIsNone(out)
         self.assertFalse(est._ref_bow.ready(ts))
+
+    def test_turned_but_head_up_frames_do_not_pollute_the_reference(self):
+        """**转头也会污染基准**(2026-09-18 真人标定才暴露的第二个污染通道)。
+
+        关键: "头没低"**不等于**"头朝前"。看手机的时候头是抬着的(pitch 正常),
+        所以只按 pitch 拦的话, 一整段转头帧都会被当成直立样本喂进基准。
+        实测后果: 25 秒转头样本进了 ~90 个样本的窗口, 它们占据了最小的那些排名,
+        基准的 p10 直接塌到 -0.5, 阈值被推到 -0.58 —— 只有最偏的 14% 转头帧还能判出来,
+        而原始数据里直立(-0.07..+0.08)和转头(-0.67..-0.40)明明隔了 0.48。
+
+        守两条: 基准的 side 下沿不许被拖走; 转头帧必须照样判得出来。
+        """
+        est = PoseHeadEstimator()
+        _, ts = feed(est, 0.0, 45.0, bow=0.52, side=0.0, face_pitch=5.0, face_yaw=0.0)
+        before = est._ref_side.stats(ts)
+        self.assertIsNotNone(before)
+        self.assertGreater(before.p10, -0.10, "初始基准的 side 下沿应该在 0 附近")
+
+        # 25 秒"抬头但转头看手机": pitch 正常 -> 老逻辑会把它当成直立样本
+        out, ts = feed(est, ts, 25.0, bow=0.52, side=-0.55,
+                       face_pitch=5.0, face_yaw=-40.0)
+
+        after = est._ref_side.stats(ts)
+        self.assertGreater(after.p10, -0.10,
+                           f"转头帧污染了基准: side p10 = {after.p10:+.3f}")
+        self.assertIsNotNone(out)
+        self.assertTrue(out.head_turned, "转头帧必须被判成转头")
+        self.assertFalse(out.head_down, "抬着头转头, 不该判成低头")
+
+    def test_reference_needs_yaw_to_be_known(self):
+        """拿不到 yaw 就不许学基准 —— "不知道头朝哪"不能当成"头朝前"。"""
+        est = PoseHeadEstimator()
+        out, ts = feed(est, 0.0, 120.0, bow=0.52, face_pitch=5.0, face_yaw=None)
+        self.assertIsNone(out)
+        self.assertFalse(est._ref_bow.ready(ts))
+
+    def test_small_head_turn_still_counts_as_upright_reference(self):
+        """轻微偏头(看屏幕时很常见)仍算直立样本, 别把基准饿死。"""
+        est = PoseHeadEstimator()
+        out, ts = feed(est, 0.0, 45.0, bow=0.52, side=0.05,
+                       face_pitch=5.0, face_yaw=8.0)   # 8° < 19° 阈值
+        self.assertIsNotNone(out)
+        self.assertTrue(est._ref_side.ready(ts))
+        self.assertFalse(out.head_turned)
 
 
 class TestAgainstRealMeasurements(unittest.TestCase):
@@ -320,7 +371,8 @@ class TestAgainstRealMeasurements(unittest.TestCase):
         for _ in range(3):                     # 循环 3 遍凑够基准样本数
             for bow, side in zip(REAL_HEAD_UP_BOW, REAL_HEAD_UP_SIDE):
                 ts += 1.0
-                est.observe_geometry(ts, geom(bow=bow, side=side), face_pitch=5.0)
+                est.observe_geometry(ts, geom(bow=bow, side=side),
+                                     face_pitch=5.0, face_yaw=0.0)
         return est, ts
 
     def test_real_head_up_samples_are_not_flagged(self):
@@ -364,10 +416,11 @@ class TestLandmarkApi(unittest.TestCase):
         ts = 0.0
         for _ in range(int(40 * HZ)):
             ts += 1.0 / HZ
-            est.observe(ts, landmarks(), SHAPE, face_pitch=5.0)
+            est.observe(ts, landmarks(), SHAPE, face_pitch=5.0, face_yaw=0.0)
         for _ in range(int(8 * HZ)):
             ts += 1.0 / HZ
-            out = est.observe(ts, landmarks(nose_up=0.05), SHAPE, face_pitch=30.0)
+            out = est.observe(ts, landmarks(nose_up=0.05), SHAPE,
+                              face_pitch=30.0, face_yaw=0.0)
         self.assertIsNotNone(out)
         self.assertTrue(out.head_down)
 

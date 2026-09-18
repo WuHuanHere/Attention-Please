@@ -66,10 +66,12 @@ QUALITY_WINDOW_SECONDS = 60.0    # 几何可用率统计窗
 MIN_QUALITY = 0.5                # 几何可用率低于此就弃权
 STILL_RATIO = 0.5                # 短窗离散度小于基准 IQR 的这个比例才算"没动"
 DEFAULT_BOOK_PITCH_DEG = 20.0
+DEFAULT_REFERENCE_MAX_YAW_DEG = 19.0   # 与"看手机"的 yaw 阈值同源(见 pose_head 注释)
 DEFAULT_DOWN_K = 1.5             # 判定余量 = max(floor, k * 短窗离散度)
 DEFAULT_TURN_K = 1.5
-# 余量下限。实测直立 bow 的 p10 ≈ 0.37, 而低头样本 bow ≈ 0.11 —— 中间有 0.26 的空档,
-# 0.08 落在空档里。⚠️ 这个默认值目前只由**一个**低头样本支撑, 必须真人实测确认。
+# 余量下限。2026-09-18 真人标定定稿: 直立 bow 的 p10 = 0.491(最小 0.459),
+# 低头 bow 的 p90 = 0.343(最大 0.376) -> 间隔 0.149, 取一半 ≈ 0.074。
+# 0.08 让阈值落在 0.343 和 0.459 正中间; 回放实测 98% 检出 / 0% 误报。
 DEFAULT_MIN_MARGIN = 0.08
 
 
@@ -175,6 +177,7 @@ class PoseHeadEstimator:
                  turn_k: float = DEFAULT_TURN_K,
                  min_margin: float = DEFAULT_MIN_MARGIN,
                  book_pitch_deg: float = DEFAULT_BOOK_PITCH_DEG,
+                 reference_max_yaw_deg: float = DEFAULT_REFERENCE_MAX_YAW_DEG,
                  feature_window: float = FEATURE_WINDOW_SECONDS,
                  scale_window: float = SCALE_WINDOW_SECONDS,
                  reference_window: float = REFERENCE_WINDOW_SECONDS,
@@ -183,6 +186,9 @@ class PoseHeadEstimator:
         self.turn_k = float(turn_k)
         self.min_margin = float(min_margin)
         self.book_pitch_deg = float(book_pitch_deg)
+        # "头朝前"的判据: |yaw| 超过它就算转头, 那样的帧不许进直立基准。
+        # 由 runtime 用 calibration.json 的 phone_yaw_deg 填(本机 19.0°)。
+        self.reference_max_yaw_deg = float(reference_max_yaw_deg)
         self._bow = TimeWindow(feature_window)
         self._side = TimeWindow(feature_window)
         self._scale = Baseline(scale_window, min_samples=SCALE_MIN_SAMPLES)
@@ -197,13 +203,19 @@ class PoseHeadEstimator:
 
     # ---- 对外 ----
     def observe(self, ts: float, landmarks, shape, *,
-                face_pitch: float | None = None) -> PoseHead | None:
+                face_pitch: float | None = None,
+                face_yaw: float | None = None) -> PoseHead | None:
         return self.observe_geometry(ts, geometry_from_landmarks(landmarks, shape),
-                                     face_pitch=face_pitch)
+                                     face_pitch=face_pitch, face_yaw=face_yaw)
 
     def observe_geometry(self, ts: float, geom: PoseGeometry | None, *,
-                         face_pitch: float | None = None) -> PoseHead | None:
-        """喂一帧。返回 None = **弃权**(Pose 没有 / 几何不可信 / 基准还没学够)。"""
+                         face_pitch: float | None = None,
+                         face_yaw: float | None = None) -> PoseHead | None:
+        """喂一帧。返回 None = **弃权**(Pose 没有 / 几何不可信 / 基准还没学够)。
+
+        `face_pitch` / `face_yaw` 是人脸模型给的头姿(没有就传 None)。它们只用来判断
+        "这一帧算不算直立基准样本" —— 基准是相对判断的锚, 锚错了后面全错。
+        """
         if geom is None:
             self._mark(ts, False)
             return None
@@ -220,8 +232,22 @@ class PoseHeadEstimator:
         self._side.add(ts, geom.side)
         self._mark(ts, True)
 
-        # --- 直立基准: 只有"人脸确认头没低"的帧才算可信样本 ---
-        trusted = face_pitch is not None and face_pitch < self.book_pitch_deg
+        # --- 直立基准: 只有"人脸确认**头没低、也没转**"的帧才算可信样本 ---
+        #
+        # ⚠️ 两个污染通道, 缺一个都不行(第二个是 2026-09-18 真人标定才暴露的):
+        #   1) 低头: 只按 pitch 拦 —— 否则低头久了基准会慢慢变成"低头"的样子;
+        #   2) **转头**: 只按 pitch 拦**不够** —— "头没低"不等于"头朝前"!
+        #      看手机的时候头是抬着的(pitch 正常), 于是一整段转头帧都被当成直立样本喂进
+        #      基准。实测后果: 25 秒的转头样本进了 ~90 个样本的窗口, 它们占据了最小的那些
+        #      排名, 于是基准的 **p10 直接塌到 -0.5**, 阈值被推到 -0.58, 只有最偏的 14%
+        #      转头帧还能被判出来 —— 而原始数据里直立(-0.07..+0.08)和转头(-0.67..-0.40)
+        #      明明隔了 0.48。
+        #      所以"直立基准"必须要求**头朝前**: |yaw| 小于"看手机"的阈值。
+        trusted = (
+            face_pitch is not None and face_pitch < self.book_pitch_deg
+            and face_yaw is not None
+            and abs(face_yaw) < self.reference_max_yaw_deg
+        )
         self._ref_bow.observe(ts, geom.bow, trusted=trusted)
         self._ref_side.observe(ts, geom.side, trusted=trusted)
 
