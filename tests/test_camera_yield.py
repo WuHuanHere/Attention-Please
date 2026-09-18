@@ -174,6 +174,26 @@ class TestYieldCausesImmediateRelease(unittest.TestCase):
         self.rt.idle_since = now - 121.0
         self.assertTrue(self.rt._should_release_now(idle_pol, now))
 
+    def test_release_log_does_not_lie_about_the_reason(self):
+        """**日志里的原因必须是真的。**
+
+        实测踩到(2026-09-18 20:17, OBS 那次): 让出摄像头时 `_release_camera` 仍然打
+        "(长时间不在判定区间, 已释放摄像头)" —— 日志里写着一个假原因。日志是
+        "该让出没让出"这类问题的第一现场, 假原因比没有原因更糟。
+        """
+        said: list[str] = []
+        self.rt._say = said.append
+        self.rt.cap = types.SimpleNamespace(release=lambda: None)
+
+        self.rt._release_camera(None)                 # 让出时的调用方式
+        self.assertEqual(said, [], "让出时不该再打一条会误导的释放原因")
+
+        said.clear()
+        self.rt.cap = types.SimpleNamespace(release=lambda: None)
+        self.rt._release_camera()                     # 普通待机
+        self.assertEqual(len(said), 1)
+        self.assertIn("长时间不在判定区间", said[0])
+
 
 class TestYieldKeywordSafety(unittest.TestCase):
     def test_shipped_keywords_do_not_contain_bare_wechat_or_qq(self):

@@ -391,11 +391,19 @@ class Runtime:
             self._yield_since = None
             self._yield_reason = ""
 
-    def _release_camera(self) -> None:
+    def _release_camera(self, note: str | None = "长时间不在判定区间") -> None:
+        """释放摄像头。`note` 是日志里的**原因** —— 必须说真话。
+
+        实测踩到(2026-09-18 20:17,OBS 那次): 让出摄像头时这里仍然打
+        "(长时间不在判定区间, 已释放摄像头)" —— 日志里的原因是假的, 而日志正是
+        "该提醒没提醒/该让出没让出"这类问题的第一现场。让出时传 `note=None`
+        (上面 `_track_yield` 已经把真正的原因写清楚了, 不必再来一条会误导的)。
+        """
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-            self._say("(长时间不在判定区间, 已释放摄像头)")
+            if note:
+                self._say(f"({note}, 已释放摄像头)")
 
     # ------------------------------------------------------------------
     # 日志
@@ -474,7 +482,8 @@ class Runtime:
 
         if not policy.judging:
             if self.cap is not None and self._should_release_now(policy, mono):
-                self._release_camera()
+                # 让出时不出声: 上面 _track_yield 已经写了真正的原因
+                self._release_camera(None if policy.camera_yield else "长时间不在判定区间")
             # Pose 弱证据的基准是"你最近的样子"。待机/休息久了它就过期了 ——
             # 拿一小时前(甚至午休前)的姿势当基准, 等于在猜。清掉, 恢复判定后重新学。
             if self.analyzer is not None:
