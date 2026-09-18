@@ -30,10 +30,6 @@ RAW = {
     "detection": {
         "screen_continuous_seconds": 10,
         "phone_continuous_seconds": 20,
-        "daze_continuous_seconds": 60,
-        "daze_yaw_std_deg": 3.0,
-        "daze_pitch_std_deg": 3.0,
-        "daze_blink_drop_ratio": 0.5,
         "away_seconds": 90,
         "resume_grace_seconds": 20,
     },
@@ -92,7 +88,7 @@ class TestEvaluate(unittest.TestCase):
         self.assertFalse(ev[SignalKind.SCREEN].active)
 
     def test_looking_down_at_book_ignores_window(self):
-        """低头看书时只判发呆, 不判窗口 —— 否则你挂着网课页面就是误报。"""
+        """低头写题时不判窗口 —— 否则你挂着网课页面就是误报。"""
         ev = evaluate(obs(0, title="哔哩哔哩 - Chrome", pitch=35.0), self.cfg, CAL)
         self.assertFalse(ev[SignalKind.SCREEN].active)
 
@@ -104,24 +100,19 @@ class TestEvaluate(unittest.TestCase):
         self.assertFalse(
             evaluate(obs(0, pose_present=False, yaw=45.0), self.cfg, CAL)[SignalKind.PHONE].active)
 
-    def test_daze_needs_head_down_stillness_and_blink_drop(self):
-        daze_obs = obs(0, pitch=35.0, yaw=0.0, yaw_std=1.0, pitch_std=1.0, blink_rate=5.0)
-        self.assertTrue(evaluate(daze_obs, self.cfg, CAL)[SignalKind.DAZE].active)
+    def test_daze_is_gone(self):
+        """发呆已于 2026-09-18 砍掉 —— 别让它悄悄回来。
 
-        awake = obs(0, pitch=35.0, yaw_std=1.0, pitch_std=1.0, blink_rate=16.0)
-        self.assertFalse(evaluate(awake, self.cfg, CAL)[SignalKind.DAZE].active)
-
-        moving = obs(0, pitch=35.0, yaw_std=8.0, pitch_std=8.0, blink_rate=5.0)
-        self.assertFalse(evaluate(moving, self.cfg, CAL)[SignalKind.DAZE].active)
-
-    def test_daze_not_judged_when_head_up(self):
-        up = obs(0, pitch=2.0, yaw_std=1.0, pitch_std=1.0, blink_rate=5.0)
-        self.assertFalse(evaluate(up, self.cfg, CAL)[SignalKind.DAZE].active)
-
-    def test_phone_posture_is_not_daze(self):
-        """右偏看手机时不该同时报发呆(不然一次分心吵两次)。"""
-        o = obs(0, pitch=35.0, yaw=45.0, yaw_std=1.0, pitch_std=1.0, blink_rate=5.0)
-        self.assertFalse(evaluate(o, self.cfg, CAL)[SignalKind.DAZE].active)
+        它依赖人脸关键点, 而低头写题时人脸覆盖率只有 12-15%; 眨眼闸门又几乎永不成立。
+        真要做回来, 得先推翻 signals.py 模块 docstring 里那三条证据。
+        """
+        self.assertNotIn("daze", {k.value for k in SignalKind})
+        self.assertNotIn("daze", Policy().enabled)
+        self.assertFalse(hasattr(self.cfg.detection, "daze_continuous_seconds"))
+        # 低头姿态下不该凭空冒出任何"发呆类"信号
+        ev = evaluate(obs(0, pitch=35.0, yaw=0.0, yaw_std=1.0, pitch_std=1.0,
+                          blink_rate=5.0), self.cfg, CAL)
+        self.assertEqual({k.value for k, v in ev.items() if v.active}, set())
 
 
 class TestScreenEpisode(unittest.TestCase):
@@ -165,12 +156,17 @@ class TestCaps(unittest.TestCase):
         acts = run(sm, [(t, {"yaw": 50.0}) for t in range(0, 70, 2)])
         self.assertEqual(nudges(acts), [(SignalKind.PHONE, 1), (SignalKind.PHONE, 2)])
 
-    def test_daze_capped_at_one(self):
+    def test_confidence_tiers_cap_the_level(self):
+        """可信度分级表本身要守住 —— 推断出来的信号不许升到最吵的那一档。
+
+        (原来这条测的是"发呆只响一声"; 发呆砍掉后, 低可信档只剩 away,
+        所以直接钉住整张表, 顺带守住 POSE 的硬性 0。)
+        """
         sm = FocusStateMachine(make_cfg(), CAL)
-        ticks = [(t, {"pitch": 35.0, "yaw_std": 1.0, "pitch_std": 1.0, "blink_rate": 4.0})
-                 for t in range(0, 200, 5)]
-        acts = run(sm, ticks)
-        self.assertEqual(nudges(acts), [(SignalKind.DAZE, 1)])
+        self.assertEqual(sm.max_level_for(SignalKind.SCREEN), 3)   # high
+        self.assertEqual(sm.max_level_for(SignalKind.PHONE), 2)    # mid
+        self.assertEqual(sm.max_level_for(SignalKind.AWAY), 1)     # low
+        self.assertEqual(sm.max_level_for(SignalKind.POSE), 0)     # 只记录
 
 
 class TestRecordOnly(unittest.TestCase):

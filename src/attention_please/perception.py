@@ -35,7 +35,7 @@ import numpy as np
 from .config import Calibration
 from .pose_head import PoseHead, PoseHeadEstimator
 
-STABILITY_WINDOW_SECONDS = 20.0  # "头没动"的观察窗(短窗 + 长连续时长 = 真发呆)
+STABILITY_WINDOW_SECONDS = 20.0  # 头姿波动的观察窗(喂给 Observation.yaw_std/pitch_std)
 BLINK_WINDOW_SECONDS = 60.0      # 眨眼率统计窗
 BLINK_THRESHOLD = 0.5
 POSE_INPUT_WIDTH = 640           # Pose 只看这个宽度的缩略图
@@ -190,7 +190,8 @@ class FrameAnalyzer:
             )
         )
         # 注意: blendshape 图会让模型创建明显变慢(实测首次 ~40s)。
-        # 不值得为它牺牲启动体验时, 把它关掉, 发呆检测会退化为"只看头没动"。
+        # 发呆已于 2026-09-18 砍掉, 所以现在**没有任何信号消费眨眼数据**;
+        # 保留测量只是为了将来要重做"眨眼/头没动"类判据时有现成入口(见 Observation 注释)。
         self.face = vision.FaceLandmarker.create_from_options(
             vision.FaceLandmarkerOptions(
                 base_options=mp_python.BaseOptions(model_asset_path=str(face_model)),

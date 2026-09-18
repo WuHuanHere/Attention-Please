@@ -169,6 +169,27 @@ class TestRealConfig(unittest.TestCase):
         self.assertEqual(cfg.capture_dir.name, "captures")
         self.assertTrue(str(cfg.db_path).endswith("events.sqlite3"))
 
+    def test_leftover_daze_keys_still_load(self):
+        """发呆被砍掉后, 老 config.toml 里残留的 daze_* 键**不许把程序弄崩**。
+
+        用户手上的 config.toml 是手改的, 升级代码时那些键还在。未知键必须被忽略
+        (而不是 KeyError / 校验失败), 否则一次升级就让监控起不来。
+        """
+        raw = {
+            "detection": {
+                "enabled_signals": ["screen", "phone", "pose", "daze"],
+                "daze_continuous_seconds": 240,
+                "daze_yaw_std_deg": 3.0,
+                "daze_pitch_std_deg": 3.0,
+                "daze_blink_drop_ratio": 0.5,
+            },
+        }
+        cfg = Config.from_dict(raw)
+        self.assertEqual(cfg.detection.screen_continuous_seconds, 10)   # 默认值仍在
+        self.assertFalse(hasattr(cfg.detection, "daze_continuous_seconds"))
+        # enabled_signals 里留着 "daze" 也无害: 状态机只遍历自己认识的枚举值
+        self.assertIn("daze", cfg.detection.enabled_signals)
+
 
 if __name__ == "__main__":
     unittest.main()

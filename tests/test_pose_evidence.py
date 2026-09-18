@@ -40,7 +40,6 @@ RAW = {
     "detection": {
         "screen_continuous_seconds": 10,
         "phone_continuous_seconds": 20,
-        "daze_continuous_seconds": 60,
         "pose_continuous_seconds": 10,
         "away_seconds": 90,
         "resume_grace_seconds": 20,

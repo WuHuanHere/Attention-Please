@@ -161,10 +161,8 @@ class QuietHours:
 class Detection:
     screen_continuous_seconds: float = 10.0
     phone_continuous_seconds: float = 25.0
-    daze_continuous_seconds: float = 240.0
-    daze_yaw_std_deg: float = 3.0
-    daze_pitch_std_deg: float = 3.0
-    daze_blink_drop_ratio: float = 0.5
+    # 发呆(daze)的四个键(daze_continuous_seconds / daze_yaw_std_deg / daze_pitch_std_deg /
+    # daze_blink_drop_ratio)已于 2026-09-18 随信号一起删除 —— 见 signals.py 模块 docstring。
     # --- Pose 弱证据(看不到脸时的粗头姿, **只记录不报警**) ---
     # 连续这么多秒才算一段, 免得单帧抖动造出一堆碎片分集。
     pose_continuous_seconds: float = 10.0
@@ -182,8 +180,8 @@ class Detection:
     # 安静时段自动变成只弹窗。默认 15 分钟 —— 上个厕所不该被念, 跑去躺着就该。
     away_reminder_seconds: float = 900.0
     resume_grace_seconds: float = 20.0
-    # 启用哪些信号。screen=窗口标题; phone=头右偏; pose=Pose 弱证据(只记录不报警);
-    # daze=发呆(依赖人脸, 而低头写题时人脸覆盖率只有 12-15% -> 暂不建议开)。
+    # 启用哪些信号。screen=窗口标题; phone=头右偏; pose=Pose 弱证据(只记录不报警)。
+    # daze(发呆)已于 2026-09-18 砍掉, 见 signals.py 模块 docstring。
     enabled_signals: list[str] = field(
         default_factory=lambda: ["screen", "phone", "pose"])
 
@@ -305,10 +303,6 @@ class Config:
             detection=Detection(
                 screen_continuous_seconds=float(d.get("screen_continuous_seconds", 10)),
                 phone_continuous_seconds=float(d.get("phone_continuous_seconds", 25)),
-                daze_continuous_seconds=float(d.get("daze_continuous_seconds", 240)),
-                daze_yaw_std_deg=float(d.get("daze_yaw_std_deg", 3.0)),
-                daze_pitch_std_deg=float(d.get("daze_pitch_std_deg", 3.0)),
-                daze_blink_drop_ratio=float(d.get("daze_blink_drop_ratio", 0.5)),
                 pose_continuous_seconds=float(d.get("pose_continuous_seconds", 10)),
                 pose_head_down_k=float(d.get("pose_head_down_k", 1.5)),
                 pose_head_turn_k=float(d.get("pose_head_turn_k", 1.5)),

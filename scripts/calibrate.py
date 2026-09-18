@@ -189,8 +189,8 @@ def main() -> int:
           f"pitch {cal.phone_pitch.mean:6.1f}° ± {cal.phone_pitch.std:4.1f}")
     print(f"符号自学习: yaw_sign={cal.yaw_sign}  pitch_sign={cal.pitch_sign}")
     print(f"阈值: 看手机 yaw > {cal.phone_yaw_deg:.1f}°   低头 pitch > {cal.book_pitch_deg:.1f}°")
-    print(f"基线眨眼率 {cal.blink_rate_per_min:.1f} 次/分 -> 发呆判据 < "
-          f"{cal.blink_rate_per_min * 0.5:.1f} 次/分")
+    # 眨眼数据目前没有任何信号消费(发呆已砍), 但校准仍测它: 这是记录, 不是判据。
+    print(f"基线眨眼率 {cal.blink_rate_per_min:.1f} 次/分(仅记录 —— 发呆信号已砍掉, 暂无人消费)")
     print(f"\n已写入: {path}")
 
     # 合理性检查: 三个姿势必须在角度上分得开, 否则阈值没意义
@@ -198,7 +198,7 @@ def main() -> int:
     if abs(cal.phone_yaw_deg - cal.screen_yaw.mean) < 8:
         problems.append("看手机和看屏幕的 yaw 几乎没差别 -> 摄像头可能拍不到你的头转向, 手机检测会失效")
     if abs(cal.book_pitch_deg - cal.screen_pitch.mean) < 6:
-        problems.append("低头和看屏幕的 pitch 几乎没差别 -> 发呆检测会失效")
+        problems.append("低头和看屏幕的 pitch 几乎没差别 -> Pose 低头判据会失效")
     if cal.screen_yaw.std > 8 or cal.screen_pitch.std > 8:
         problems.append("看屏幕时头就在大幅晃动 -> 门槛需要放宽, 或坐姿要稳一点")
     for p in problems:

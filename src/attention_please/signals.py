@@ -6,8 +6,17 @@
 已确认的判定口径:
   切到娱乐窗口(screen)  高可信  连续 screen_continuous_seconds 秒    可升到 max_level_high
   看手机(phone)          中可信  连续 phone_continuous_seconds 秒     可升到 max_level_mid
-  发呆(daze)             低可信  连续 daze_continuous_seconds 秒      可升到 max_level_low
-  离开(away)             ——      Pose 丢失 away_seconds 秒           只记录不提醒
+  离开(away)             低可信  Pose 丢失 away_reminder_seconds 秒   只记录 + 最多 1 声
+  Pose 弱证据(pose)      ——      连续 pose_continuous_seconds 秒     **只记录, 永不报警**
+
+**发呆(daze)已于 2026-09-18 砍掉**(用户拍板, 见 HANDOFF §9)。三条独立证据:
+  1. 它依赖人脸关键点, 而低头写题时人脸覆盖率只有 12-15% —— 在最需要它的场景下天然不可用;
+  2. 它的眨眼闸门用校准基线 3.0/分(正常人 15-20), `blink_rate < 1.5` 几乎永不成立
+     -> 它既不误报也不生效, 是个"哑"信号;
+  3. 改用 Pose 来报警也不行: Pose 判"低头"确实准(真人标定 98%), 但"低头 + 头不动 4 分钟"
+     正是**认真写题**的样子 —— 拿它报警就是最大的误报源。
+它想要的价值(把"看不到脸"那段时间说清楚)现在由 **Pose 弱证据通道**承担, 而那条通道
+**只记录不报警**。代码在 git 历史里(commit dfc1114 之前), 要复活请连同上面的证据一起重新评估。
 
 三条硬约束:
   1. 误报最烦 -> 门槛(连续时长) + 迟滞(release) + 冷却(cooldown) 三重抑制;
@@ -28,7 +37,6 @@ from .wordlist import TitleVerdict, classify
 class SignalKind(str, Enum):
     SCREEN = "screen"
     PHONE = "phone"
-    DAZE = "daze"
     # 离开座位太久。它**不走 enabled_signals 开关**, 由 away_reminder_seconds 控制
     # (0 = 关闭), 因为"人不在"和"人在但分心"是两件不同的事。
     AWAY = "away"
@@ -42,7 +50,6 @@ class SignalKind(str, Enum):
 CONFIDENCE: dict[SignalKind, str] = {
     SignalKind.SCREEN: "high",
     SignalKind.PHONE: "mid",
-    SignalKind.DAZE: "low",
     SignalKind.AWAY: "low",      # 上限 1 声 -> 一次离开只会响一次, 不会连环叫
     SignalKind.POSE: "record",   # 只记录: 见 max_level_for 里的硬性 0
 }
@@ -50,7 +57,6 @@ CONFIDENCE: dict[SignalKind, str] = {
 SIGNAL_LABEL: dict[SignalKind, str] = {
     SignalKind.SCREEN: "切到了娱乐窗口",
     SignalKind.PHONE: "在看手机",
-    SignalKind.DAZE: "疑似发呆",
     SignalKind.AWAY: "离开座位太久",
     SignalKind.POSE: "Pose 弱证据(只记录)",
 }
@@ -68,7 +74,10 @@ class Observation:
     pose_present: bool = False
     yaw: float | None = None          # 度, 向右为正
     pitch: float | None = None        # 度, 低头为正
-    yaw_std: float | None = None      # 发呆窗口内的波动
+    # ⚠️ 下面四个字段**目前没有任何信号消费**(发呆已于 2026-09-18 砍掉, 见模块 docstring)。
+    # 留着是因为采集层(perception)仍在测, 将来真要再做"头没动/眨眼"类判据时有现成入口 ——
+    # 但**别以为它们现在有用**: 要启用必须先回答"当年砍掉发呆的那三条证据还成立吗"。
+    yaw_std: float | None = None      # 头姿在 20 秒窗内的波动
     pitch_std: float | None = None
     blink_rate: float | None = None   # 次/分
     eye_closed_ratio: float | None = None
@@ -91,7 +100,7 @@ class Policy:
     # 结果是"新增一个信号但默认值里没有它" —— 单测里它永远不触发, 而生产里会触发,
     # 两边行为不一致。
     enabled: frozenset[str] = frozenset(
-        {"screen", "phone", "daze", "pose"})
+        {"screen", "phone", "pose"})
 
 
 @dataclass
@@ -181,28 +190,10 @@ def evaluate(obs: Observation, cfg: Config, cal: Calibration) -> dict[SignalKind
         f"头向右偏 {obs.yaw:.0f}°(阈值 {cal.phone_yaw_deg:.0f}°)" if phone_active else "",
     )
 
-    # --- 发呆: 只在低头(看书)姿态下判定; 需要"头没动" + "眨眼变少"两个证据 ---
-    head_down = obs.pitch is not None and obs.pitch >= cal.book_pitch_deg
-    not_phone = obs.yaw is None or obs.yaw <= cal.phone_yaw_deg
-    still = (
-        obs.yaw_std is not None
-        and obs.pitch_std is not None
-        and obs.yaw_std < det.daze_yaw_std_deg
-        and obs.pitch_std < det.daze_pitch_std_deg
-    )
-    if obs.blink_rate is None:
-        blink_low = True  # 拿不到眨眼数据时不因此否决, 由"头没动"单独承担
-        blink_txt = "眨眼数据不可用"
-    else:
-        blink_low = obs.blink_rate < cal.blink_rate_per_min * (1.0 - det.daze_blink_drop_ratio)
-        blink_txt = f"眨眼 {obs.blink_rate:.0f}/分(基线 {cal.blink_rate_per_min:.0f})"
-    daze_active = obs.pose_present and head_down and not_phone and still and blink_low
-    out[SignalKind.DAZE] = SignalEval(
-        daze_active,
-        f"头部静止(偏航波动 {obs.yaw_std:.1f}°, 俯仰波动 {obs.pitch_std:.1f}°), {blink_txt}"
-        if daze_active
-        else "",
-    )
+    # --- 发呆(DAZE)已于 2026-09-18 砍掉 —— 见模块 docstring 里的三条证据 ---
+    # 原来这里是"低头 + 头没动 + 眨眼变少"三合一。它被砍掉之后, `yaw_std`/`pitch_std`/
+    # `blink_rate`/`eye_closed_ratio` 这四个观测字段就**没有任何信号消费了**
+    # (采集层仍在测, 见 Observation 上的注释)。
 
     # --- Pose 弱证据: **只在看不到脸的时候**用它(看得到脸就有更好的证据) ---
     # 它回答的是"看不清的那段时间里, 你到底在不在、是不是在写题", 而不是"要不要提醒你"。
@@ -270,7 +261,6 @@ class FocusStateMachine:
         return {
             SignalKind.SCREEN: d.screen_continuous_seconds,
             SignalKind.PHONE: d.phone_continuous_seconds,
-            SignalKind.DAZE: d.daze_continuous_seconds,
             SignalKind.POSE: d.pose_continuous_seconds,
             SignalKind.AWAY: d.away_reminder_seconds,
         }[signal]

@@ -2,7 +2,7 @@
 
 北极星指标是"有效专注时长", 但单独一个数字会骗人, 所以日报固定四行
 (计划 / 有效专注 / 分心 / 暂停+离开), 再加一段**数据可信度**:
-人脸覆盖率低的时候, "看手机/发呆"其实是在瞎猜, 那段时间记为"看不清",
+人脸覆盖率低的时候, "看手机"其实是在瞎猜, 那段时间记为"看不清",
 既不算专注也不算分心 —— 不能拿"看不清"冒充"你很专注"。
 """
 from __future__ import annotations
@@ -127,7 +127,7 @@ def build_report(cfg: Config, store: Store, day: str,
 
     lines.append("## 数据可信度")
     lines.append(f"- 人脸覆盖率 **{st.coverage * 100:.0f}%**"
-                 f"(低于 90% 时「看手机/发呆」信号不可靠)")
+                 f"(低于 90% 时「看手机」信号不可靠)")
     if st.camera_busy_seconds:
         lines.append(f"- ⚠️ 因摄像头被占用漏检 {_hm(st.camera_busy_seconds)}")
     if st.blind_seconds > 60:

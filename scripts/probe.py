@@ -270,7 +270,7 @@ def cmd_pipe(index: int, seconds: int) -> None:
     """**验收用的实测**: 跑产品真正要用的那条管线(720p + Pose 裁头 + Face)。
 
     这是 M0 最该看的一张表: 帧率、CPU、Pose 检出率、人脸检出率、头部框像素。
-    人脸检出率就是"看手机/发呆"两个信号今天能不能用的直接前提。
+    人脸检出率就是"看手机"信号今天能不能用的直接前提。
     """
     import cv2
 
@@ -326,7 +326,7 @@ def cmd_pipe(index: int, seconds: int) -> None:
     say("| 指标 | 数值 | 含义 |")
     say("|---|---|---|")
     say(f"| Pose 检出率 | **{pose_hits / max(frames, 1) * 100:.0f}%** | 人在不在画面里 |")
-    say(f"| 人脸检出率 | **{face_hits / max(frames, 1) * 100:.0f}%** | 看手机/发呆信号能否工作 |")
+    say(f"| 人脸检出率 | **{face_hits / max(frames, 1) * 100:.0f}%** | 看手机信号能否工作 |")
     if boxes:
         say(f"| 头部框像素 | 中位 {pct(boxes, 0.5)} px (最小 {min(boxes)}, 最大 {max(boxes)}) | "
             f"小于 200px 时人脸检测会开始漏 |")
@@ -335,7 +335,7 @@ def cmd_pipe(index: int, seconds: int) -> None:
     if face_rate >= 90:
         say("- ✅ 人脸覆盖率达标(≥90%), 三个信号都能工作。")
     elif face_rate >= 50:
-        say("- ⚠️ 人脸覆盖率一般。会有一段时间判不出'看手机/发呆', "
+        say("- ⚠️ 人脸覆盖率一般。会有一段时间判不出'看手机', "
             "运行时会把这些时间记为**看不清**并写进日报。")
     else:
         say("- ❌ 人脸覆盖率过低: 坐近一点 / 把笔记本拉近 / 抬高摄像头对准脸, "
@@ -347,7 +347,7 @@ def cmd_pipe(index: int, seconds: int) -> None:
 def cmd_faces(index: int, seconds: int) -> None:
     """人脸检测诊断: 找出 Face 检出率为 0 的原因。
 
-    头姿(yaw/pitch)完全依赖 face_landmarker —— 它一帧检不出, "看手机"和"发呆"
+    头姿(yaw/pitch)完全依赖 face_landmarker —— 它一帧检不出, "看手机"
     两个信号就全是废的, 所以这一项必须在 M0 里闭合。
 
     对照实验: 同一批帧, 分别喂 (a) 整帧 (b) 用 Pose 定位后裁剪放大的头部区域。
