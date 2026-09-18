@@ -13,6 +13,7 @@ import tempfile
 import types
 import unittest
 from datetime import datetime
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -107,6 +108,31 @@ class TestDispatchContract(unittest.TestCase):
         now = datetime.now()
         self.rt.dispatch([EpisodeEnd(SignalKind.SCREEN, now, 20.0, 30.0, 2, False, "证据")])
         self.assertIn("EpisodeEnd", self.rt.log.path.read_text(encoding="utf-8"))
+
+    def test_record_only_episode_saves_no_capture(self):
+        """**只记录的分集不许截图**(2026-09-18 真机验证时抓到)。
+
+        POSE 分集只是"看不到脸时 Pose 觉得你在低头", 不是分心; 背单词时段的 phone
+        也走只记录。给它们存"屏幕+摄像头"拼接图既是隐私问题(低头写题会被拍一堆),
+        也会把 captures/ 塞满, 还会让人误以为"它又报警了"。
+        实测: 一段 33 秒的 pose 分集真的存了一张图。
+        """
+        now = datetime.now()
+        with mock.patch("attention_please.capture.save_composite") as save:
+            self.rt.dispatch([EpisodeStart(SignalKind.POSE, "Pose 弱证据(低头/没动)",
+                                           now, 0.0, True)])
+            save.assert_not_called()
+        st = self.rt.store.day_stats(now.date().isoformat())
+        self.assertEqual(st.episodes, 0, "只记录的分集不算分心")
+        self.assertEqual(st.pose_weak_seconds, 0.0)   # 只有 start, 没有 end
+
+    def test_normal_episode_still_saves_a_capture(self):
+        """对照组: 真正的分心分集必须照旧存证据图。"""
+        now = datetime.now()
+        with mock.patch("attention_please.capture.save_composite",
+                        return_value=pathlib.Path("x.jpg")) as save:
+            self.rt.dispatch([EpisodeStart(SignalKind.SCREEN, "证据", now, 0.0, False)])
+            save.assert_called_once()
 
 
 if __name__ == "__main__":

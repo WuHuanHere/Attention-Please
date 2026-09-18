@@ -490,7 +490,13 @@ class Runtime:
                       f"{'(只记录)' if act.record_only else ''}: {act.evidence}")
                 self._log("episode_start", signal=act.signal.value,
                           evidence=act.evidence, detail="record_only" if act.record_only else None)
-                self._capture(act, frame)
+                # **只记录的分集不截图**。截图的用途是"分心现场证据"(事后调参时看当时
+                # 在看什么/什么姿态)。而 POSE 分集只是"看不到脸时 Pose 觉得你在低头",
+                # 背单词时段的 phone 也走只记录 —— 给它们存图既是隐私问题(低头写题会被
+                # 拍一堆), 也会把 captures/ 塞满, 还会让人误以为"它又报警了"。
+                # (2026-09-18 真机验证时抓到的: 一段 33 秒的 pose 分集就存了一张图。)
+                if not act.record_only:
+                    self._capture(act, frame)
             elif isinstance(act, EpisodeEnd):
                 self.counters.episodes += 1
                 self.counters.distract_seconds += act.duration
