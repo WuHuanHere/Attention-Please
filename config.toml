@@ -117,8 +117,9 @@ enabled_signals = ["screen", "phone"]
 # 低于该置信度的判定一律只记录不报警(宁可漏报, 你说了误报最烦)
 # 切到娱乐窗口: 连续多少秒才提醒
 screen_continuous_seconds = 10
-# 看手机(头右偏): 连续多少秒才提醒
-phone_continuous_seconds = 25
+# 看手机(头右偏): 连续多少秒才提醒。**2026-09-18 从 25 秒调到 15 秒** ——
+phone_continuous_seconds = 15
+# 回一条消息通常 20-40 秒, 25 秒会漏掉; 15 秒能抓住。觉得太敏感就往上调。
 # 发呆: 头部姿态几乎不变持续多少秒才提醒(默认 4 分钟)
 daze_continuous_seconds = 240
 # 发呆的头姿稳定性判据: 窗口内 pitch/yaw 标准差小于该值(度)才算"没动"

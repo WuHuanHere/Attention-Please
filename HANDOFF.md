@@ -79,7 +79,7 @@ Get-ChildItem src\attention_please\*.py | Sort-Object LastWriteTime -Descending 
 | 交互校准(三姿势 → 阈值 + 符号自学习) | ✅ 已完成,`calibration.json` 已生成 |
 | 720p 双分辨率感知(Pose 定位头部 → 裁剪放大 → 人脸) | ✅ 实测人脸检出 99–100% |
 | 切窗口信号(screen) | ✅ **已启用** |
-| 看手机信号(phone) | ✅ **已启用**(2026-09-18 12:48 热重载) |
+| 看手机信号(phone) | ✅ **已启用**(2026-09-18 12:48 热重载);门槛 **15 秒**(9/18 13:08 从 25 调小) |
 | 离开太久提醒(away) | ✅ 已实现,**需重启实例才生效** |
 | 发呆信号(daze) | ❌ 已实现但**不建议开**(原因见 §9) |
 | 分级提醒 + 带证据弹窗 + "判定错了" | ✅ |
@@ -391,8 +391,8 @@ $env:AP_UI_TESTS='1'; .\.venv\Scripts\python.exe -m unittest tests.test_ui_lifec
 
 
 
-- **观察 phone 信号的真实误报**(9/18 中午刚开):看有没有"向右拿东西/看笔记 >25 秒"被误报;
-  太敏感就调 `phone_continuous_seconds`(25 → 35)。数据在 `event` 表 `signal='phone'`。
+- **观察 phone 信号的真实误报**(9/18 中午刚开):看有没有"向右拿东西/看笔记 >15 秒"被误报;
+  太敏感就调 `phone_continuous_seconds`(现在 15, 往上调回 20-25)。数据在 `event` 表 `signal='phone'`。
 - **离座提醒需要重启实例才生效**(代码已就绪)。
 - **日报口径修复也需要重启**(否则 21:30 的日报还是旧分母)。
 - ~~**`git init`**~~ → **已完成**(2026-09-18):`main` 分支,首次提交 `6016a2c`(57 文件/9719 行)
