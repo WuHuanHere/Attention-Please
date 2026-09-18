@@ -368,6 +368,7 @@ coverage_minute(day, minute, ticks, pose_hits, face_hits, judging, PRIMARY KEY(d
 | `analyze_log.py` | 一键体检:错误行、派发记录、状态机快照、分集/提醒对照、**按信号的分集统计**、低覆盖率分钟 |
 | `posenoise.py` | 离线量 Pose 头部关键点的几何与噪声(跑 `captures/*.jpg` 的摄像头那一半, **不需要摄像头**) |
 | `poselabel.py` | **M4 真人标定**(需要摄像头空闲):按屏幕提示摆 5 个姿势约 2 分钟, 直接给出"低头判据分得开/分不开"与建议阈值 |
+| `verify_wiring.py` | **接线验证**(不需要摄像头):用 `captures/` 的一张真实画面跑**完整生产管线**, 确认 `analyze() -> pose_head` 不抛异常、且 POSE 只记录不报警。改完 perception/signals 接线后跑一次 |
 | `replay_real.py` | 用数据库真实分集时间戳回放状态机(定位"该提醒没提醒") |
 | `verify_fix.py` | 修复前后逐分集对比"提醒数"(证明修复有效) |
 | `phone_sim.py` | 用真实校准值模拟看手机/低头/右偏各场景是否触发 |
