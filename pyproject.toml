@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "attention-please"
+version = "0.1.0"
+description = "考研专注监控: 用笔记本摄像头判断你是否分心, 并按可信度分级提醒"
+requires-python = ">=3.11,<3.13"
+
+# 运行时依赖。注意 opencv 由 mediapipe 连带引入, 这里显式列出以便固定版本。
+dependencies = [
+    "mediapipe==1.0.1",
+    "opencv-contrib-python",
+    "Pillow",
+    "pywin32",
+    "pystray",
+]
+
+[project.optional-dependencies]
+# 打包成 exe 时才需要(体积大, 平时不装)
+package = ["pyinstaller"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

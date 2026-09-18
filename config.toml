@@ -1,0 +1,174 @@
+# attention_please 配置(手改这个文件即可, 程序不会覆盖它)
+# 校准结果写在 calibration.json, 事件与日报写在 data/, 分心截图写在 captures/
+# 改完保存即生效(程序每分钟重读一次配置)
+
+[general]
+# 用 scripts\pick_camera.py 逐个预览后确认(人眼确认, 别靠自动判据)
+# 实测本机三个设备: 0 = 真 RGB 摄像头(可用)  1 = 红外灰度  2 = OBS 虚拟摄像头(静帧)
+# 注意: 索引 0 画面饱和度只有 ~28, 房间偏暗 -> 开灯能让姿态/人脸检出率明显变好
+camera_index = 0
+# 检测频率(帧/秒)。M0 实测: 640x480 下 Pose+Face 全跑能到 21 fps、CPU 约 32% 单核, 所以 5 很宽裕
+tick_hz = 5
+# 采集分辨率。**不要降到 640x480**: 实测那个分辨率下人脸检出率是 0%,
+# "看手机"和"发呆"两个信号会直接失效。720p + Pose 裁头 = 你正常坐姿 100% 检出。
+camera_width = 1280
+camera_height = 720
+# 时间表内自动进入监控。关掉则只能手动"开始学习"
+auto_monitor_in_schedule = true
+# 单实例: 已经在跑就不再开第二个
+single_instance = true
+
+[schedule]
+# 时间表外一律待机(不判定不记录), 但托盘可以手动"现在开始学习"
+# kind: focus = 监控; 其余时间自动算休息
+# allow_phone: 该时段"看手机"只记录不报警(背单词等)
+[[schedule.block]]
+name = "高数强化听课"
+start = "08:30"
+end = "10:30"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "数学刷题"
+start = "10:40"
+end = "11:30"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "电路(听课+做题)"
+start = "13:00"
+end = "15:00"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "英语单词"
+start = "15:10"
+end = "15:40"
+kind = "focus"
+allow_phone = true
+
+[[schedule.block]]
+name = "英语真题精读"
+start = "15:40"
+end = "16:40"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "数学/电路做题"
+start = "16:50"
+end = "17:50"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "当日复习整理"
+start = "17:50"
+end = "18:30"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "数学/政治"
+start = "20:00"
+end = "21:00"
+kind = "focus"
+allow_phone = false
+
+[[schedule.block]]
+name = "回顾整理+明日计划"
+start = "21:00"
+end = "21:30"
+kind = "focus"
+allow_phone = false
+
+[reminder]
+# 可信度分级: high=窗口标题命中黑名单, mid=看手机推断, low=发呆推断
+# 每一级最大升级档位: 1=单声  2=三声  3=循环+置顶弹窗
+max_level_high = 3
+max_level_mid = 2
+max_level_low = 1
+# 升级阶梯: **首次提醒之后**经过这些秒数就升一档(不是从信号出现算起)
+escalate_after = [0, 10, 30]
+# 同一次分心结束后, 同原因多少秒内不重复提醒
+cooldown_seconds = 180
+# 静默上限: 一次分心**连续**超过这么久还没出过声, 就强行提醒一次。
+# 冷却的锚点是"上一次真的响过的时刻"(不是上一次分心结束), 否则一集接一集地切窗口
+# 会把冷却无限顺延 —— 实测出现过"连续 109 秒、甚至 18 分钟一声不吭"。
+# 想更灵敏就调小(比如 60), 想更安静就调大。
+max_silent_episode_seconds = 90
+# 点了"判定错了"之后, 该信号静默多久
+wrong_feedback_mute_seconds = 900
+# 提醒窗口显示判定证据(建议保持 true: 误报时你能知道它凭什么)
+show_evidence = true
+
+[quiet_hours]
+# 安静时段: 不发声, 只弹窗。18:00 后家里有人
+enabled = true
+ranges = ["18:00-24:00"]
+
+[detection]
+# 启用哪些信号。screen=切到娱乐窗口; phone=看手机(头右偏, 手机在右手边); daze=发呆(暂不建议开)
+# 2026-09-18 中午起: screen + phone。保存后一分钟内热重载生效。
+enabled_signals = ["screen", "phone"]
+# 低于该置信度的判定一律只记录不报警(宁可漏报, 你说了误报最烦)
+# 切到娱乐窗口: 连续多少秒才提醒
+screen_continuous_seconds = 10
+# 看手机(头右偏): 连续多少秒才提醒
+phone_continuous_seconds = 25
+# 发呆: 头部姿态几乎不变持续多少秒才提醒(默认 4 分钟)
+daze_continuous_seconds = 240
+# 发呆的头姿稳定性判据: 窗口内 pitch/yaw 标准差小于该值(度)才算"没动"
+daze_yaw_std_deg = 3.0
+daze_pitch_std_deg = 3.0
+# 发呆的眨眼判据: 相对校准基线的眨眼率下降比例
+daze_blink_drop_ratio = 0.5
+# 离开: Pose 丢失多少秒后开始记为"离开"(只记录不报警)
+away_seconds = 90
+# 离开**太久**才提醒一次(秒)。0 = 关闭。
+# 级别上限是"低"(1 声), 所以一次离开只会提醒一次, 不会连环叫;
+# 安静时段(18:00 后)自动变成只弹窗。上个厕所不该被念, 跑去躺着就该。
+away_reminder_seconds = 900
+# 人回来了多久才重新开始判定(防止刚坐下就被念)
+resume_grace_seconds = 20
+
+[whitelist]
+# 命中白名单优先算专注(先查这个, 再查黑名单)
+words = [
+  "Visual Studio Code", "vscode", "- Code", "Typora", "Obsidian", "Notion",
+  "百度网盘", "腾讯课堂", "中国大学MOOC", "慕课", "Bilibili 课堂",
+  "Adobe", "Acrobat", "福昕", "PDF", "SumatraPDF", "Koodo",
+  "数学", "电路", "英语", "政治", "考研", "真题", "单词", "网课", "笔记",
+  "高等数学", "线性代数", "概率", "王道", "880", "1800", "肖秀荣", "徐涛", "腿姐",
+  "Anki", "欧路词典", "不背单词", "墨墨", "Xmind", "Geogebra", "GeoGebra",
+  "MATLAB", "Multisim", "LTspice", "Proteus", "Quartus", "Altium", "Keil", "PyCharm"
+]
+
+[blacklist]
+# 只在白名单未命中时才查这张表
+words = [
+  "哔哩哔哩", "bilibili", "抖音", "TikTok", "微信", "WeChat", "QQ",
+  "王者荣耀", "英雄联盟", "League", "Steam", "Epic", "微博", "小红书",
+  "知乎", "淘宝", "京东", "拼多多", "斗鱼", "虎牙", "爱奇艺", "腾讯视频",
+  "优酷", "Netflix", "原神", "Genshin", "Minecraft", "我的世界",
+  "贴吧", "豆瓣", "漫画", "小说", "影音", "PotPlayer", "网易云音乐", "QQ音乐"
+]
+
+[privacy]
+# 分心时把"屏幕截图 + 摄像头画面"拼成一张图保存(便于事后调参)
+save_captures = true
+# 同时存原始摄像头帧(单独目录), 仅调参时有用
+save_raw_camera_frame = false
+# 自动清理天数
+capture_retention_days = 7
+# 截图缩放后的宽度(越小越省空间, 拼接图高度按比例)
+capture_width = 960
+
+[report]
+# 每天生成 markdown 日报并弹一次托盘总结
+daily_report = true
+report_time = "21:30"
+report_dir = "data/reports"

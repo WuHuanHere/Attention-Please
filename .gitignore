@@ -1,0 +1,17 @@
+# 虚拟环境与依赖
+.venv/
+__pycache__/
+*.pyc
+
+# 模型文件(9 MB, 用 scripts/download_models.py 重新下载, 不进版本库)
+models/*.task
+
+# 实测与调试产物
+probe_out/
+
+# 运行时产物
+data/
+captures/
+
+# 个人数据: 你的坐姿阈值, 不该进版本库
+calibration.json

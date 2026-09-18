@@ -1,0 +1,163 @@
+# attention_please
+
+考研专注监控:用笔记本摄像头判断你是不是分心了,并按**信号可信度分级**提醒。
+
+它不是为了"抓你"而存在,而是为了让"今天有效专注了多久"变成一个你无法自欺的数字。
+两条设计铁律:
+
+1. **误报最烦** —— 打断心流比漏掉一次分心更伤。所以每个信号都有连续时长门槛 + 迟滞 + 冷却,
+   而且推断出来的信号(看手机/发呆)不许升级到最吵的那一档。
+2. **漏报必须可见** —— 摄像头被占用、脸不在画面里,都要在日报里写清楚漏了多久,
+   否则这份专注报告就是安慰剂。
+
+## 快速开始
+
+```powershell
+cd 'E:\Users\Wu Fan\OneDrive\Code\attention_please'
+
+# 1) 虚拟环境 + 依赖(注意 --no-cache-dir, 见"踩过的坑")
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-cache-dir -r requirements.txt
+
+# 2) 下载 MediaPipe 模型(约 9 MB, 之后完全离线)
+.\.venv\Scripts\python.exe scripts\download_models.py
+
+# 3) 选摄像头: 逐个预览, 你自己按 Y 确认(别信自动判据, OBS 虚拟摄像头会骗过它)
+.\.venv\Scripts\python.exe scripts\pick_camera.py
+
+# 4) 校准(必做, 约 1 分钟): 按提示摆"看屏幕/低头看书/转头看手机"三个姿势
+.\.venv\Scripts\python.exe scripts\calibrate.py
+
+# 5) 干活。试跑(带终端输出, 能看见它凭什么提醒你):
+.\.venv\Scripts\python.exe scripts\run.py
+#    日常(只有托盘图标, 无控制台):
+.\.venv\Scripts\pythonw.exe scripts\run_tray.py
+
+# 6) 可选: 开机自启(在"启动"文件夹放一个快捷方式, 随时可撤销)
+.\.venv\Scripts\python.exe scripts\autostart.py install
+.\.venv\Scripts\python.exe scripts\autostart.py status
+.\.venv\Scripts\python.exe scripts\autostart.py uninstall
+
+# 7) 单测(不需要摄像头)
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+```
+
+## 判定口径
+
+| 信号 | 证据 | 可信度 | 默认门槛 | 升级上限 |
+|---|---|---|---|---|
+| 切到娱乐窗口 | 前台窗口标题命中黑名单(白名单优先)**且能看到你的脸、头没有低下去** | 高 | 连续 10 秒 | 1声 → 3声 → 循环+置顶弹窗 |
+| 看手机 | 头向右偏超过校准阈值(手机架在右手边,摄像头拍不到手机本身) | 中 | 连续 25 秒 | 最多 3 声 |
+| 发呆 | 低头姿态下头部姿态几乎不变 + 眨眼率下降 | 低 | 连续 4 分钟 | 最多 1 声 + 带证据弹窗 |
+| 离开座位 | Pose 关键点丢失 | —— | 90 秒记录 / 15 分钟提醒一次 | 最多 1 声 + 常驻弹窗 |
+
+- **人不在检测框里时**:90 秒后记一条「离开座位」(不响不弹窗, 托盘图标变**蓝**);
+  正在进行的"分心分集"会在 5 秒迟滞后结束入库; 这段时间若人脸覆盖不足会被记为
+  「看不清」(既不算专注也不算分心); 你回来后给 20 秒坐下宽限期, 期间只记录不提醒。
+  离开时长只在**判定中**累计 —— 跨过午休/暂停的那段不会被算成"离开"。
+- **离开超过 15 分钟**(`away_reminder_seconds`, 0 = 关闭)会提醒**一次**:
+  白天响一声、18:00 后只弹窗;弹窗**不会自动关闭**(你不在座位上, 回来得看见它凭什么响过)。
+  它**不算分心** —— 不计入分集次数与分心时长。
+- 头朝前 → 按窗口内容判;**头低下去 → 只判发呆**,不判窗口(看纸书时挂着网课页面不算分心)。
+- **看不到你的脸时,绝不替你下结论**:窗口信号的成立条件是"能看到脸 + 头没有低下去"。
+  因此"把 B 站晾在前台、自己低头写题"不会被记成玩电脑;代价是"靠回椅背、脸出画面地看视频"
+  会漏判 —— 那段时间会被覆盖率如实记成**看不清**写进日报,不会假装你在专注。
+  (2026-09-17 实测教训:旧逻辑把"拿不到头姿"当成"在看屏幕",导致低头写题被误报。)
+- 提醒弹窗会写明依据("窗口标题命中黑名单「哔哩哔哩」持续 12 秒"),并给一个
+  **"判定错了"** 按钮:点一下该信号静默 15 分钟、只入库不报警,**不会**自动调参
+  (样本太少自动调只会更糟,攒够日志后人工调阈值)。
+- 按当前配置**只启用了「切到娱乐窗口」一个信号**(`config.toml` 里 `enabled_signals`)。
+  另外两个代码已实现并通过单测,但要先用一天真实数据确认它们不误报。
+
+## 托盘与暂停
+
+托盘图标颜色即状态:**绿 = 判定中, 灰 = 待机(时间表外), 黄 = 已暂停, 红 = 摄像头不可用**。
+右键菜单:
+
+| 菜单项 | 作用 |
+|---|---|
+| 暂停监控(要写理由) | 弹出输入框,**理由必填**(这就是"暂停的代价"),理由会进日报 |
+| 恢复学习 | 结束暂停;暂停时长单列统计,不算专注也不算分心 |
+| 现在开始学习(60 分钟) | 时间表外也能临时开一段判定;作息表内仍按作息表的块走 |
+| 打开今日日报 | 用系统默认程序打开 `data/reports/YYYY-MM-DD.md` |
+| 查看分心截图 / 清空所有截图 | 打开 `captures/` 或一键清空 |
+| 退出 | 停监控并退出(退出很快,不会被模型 40 秒的 close 卡住) |
+
+## 日报 / 截图 / 隐私
+
+- 每天到 `report_time`(默认 21:30)生成 `data/reports/YYYY-MM-DD.md`,固定四行:
+  **计划时长 / 有效专注 / 分心 / 暂停+离开**,外加"最常分心的时段"、
+  "分心前在看什么窗口",以及一段**数据可信度**(人脸覆盖率、摄像头占用漏检时长)。
+- 分心开始时存一张"屏幕截图 + 摄像头画面"的拼接图到 `captures/`,默认 **7 天自动清理**,
+  托盘可一键清空;可在 `config.toml` 的 `[privacy]` 里关掉。
+- 图像**不上传任何地方**;模型下载后可完全离线运行。
+
+## 配置
+
+全部在 `config.toml`(带注释,手改即可,程序**每分钟自动重载**,不用重启):
+
+- `[schedule]` 作息表,时间表外待机;`allow_phone = true` 的时段"看手机"只记录不报警
+  (背单词用手机时这么设)。
+- `[quiet_hours]` 安静时段不发声、只弹窗(默认 18:00 后)。
+- `[whitelist]` / `[blacklist]` 窗口标题关键词,**白名单优先**
+  (所以"Bilibili 课堂"不会被 bilibili 黑名单误杀)。
+- `[detection]` 各信号门槛与启用开关;`[reminder]` 升级阶梯与冷却;
+  `[privacy]` 截图与保留天数;`[report]` 日报时间。
+
+校准产生的个人阈值写在 `calibration.json`(不进版本库)。
+
+## 目录结构
+
+```
+config.toml                 你的作息/名单/提醒/隐私(热重载)
+calibration.json            校准产出(机器写, 别手改)
+src/attention_please/
+  config.py                 配置与校准数据(纯逻辑)
+  wordlist.py               窗口标题 -> 专注/分心/未知(纯逻辑)
+  signals.py                特征 -> 信号 -> 分集 -> 分级提醒(纯逻辑状态机)
+  camera.py                 摄像头选型与开流
+  perception.py             MediaPipe 封装: 720p 采集 + Pose 定位 + 头部裁剪人脸检测
+  input_activity.py         全局键鼠空闲时长(GetLastInputInfo, 不记录你按了什么)
+  foreground.py             前台窗口标题
+  store.py                  SQLite: 事件流 + 每分钟人脸覆盖率
+  report.py                 日报 markdown
+  capture.py                屏幕+摄像头拼接截图与 7 天清理
+  notifier.py               分级提示音
+  ui.py                     带证据的置顶弹窗 + 暂停理由输入(全进程单 Tk 线程)
+  tray.py                   托盘图标与菜单
+  runtime.py                编排: 读帧/策略/派发/记账/每日任务
+scripts/
+  run.py                    试跑入口(带终端输出)
+  run_tray.py               日常入口(只有托盘, 供开机自启)
+  autostart.py              开机自启 安装/卸载/检查
+  calibrate.py              交互校准
+  pick_camera.py            选摄像头(人眼确认)
+  tune_distance.py          距离/取景调试器(人脸检不出时用它)
+  probe.py                  实测工具(list/bench/faces/res/pipe/contend/offline)
+  check_face_model.py       人脸模型自检(用标准人像验证模型本身)
+  download_models.py        下载模型(用 Python, 不用 PowerShell)
+tests/                      120 项纯逻辑单测, 不需要摄像头
+```
+
+## 踩过的坑(都是这台机器上真实踩出来的)
+
+- **pip 会挂死**:默认缓存目录 `E:\Programs\Python\Python\pipcache` 在工作区之外,
+  受限环境下 pip 写缓存会卡住(显示"Downloading"但字节数一动不动)。
+  解决:`pip install --no-cache-dir`;诊断用 `-vvv` 观察临时目录字节数。
+- **PowerShell 的 TLS 在这台机器上是坏的**:`Invoke-WebRequest` / `curl.exe` 报
+  `SEC_E_NO_CREDENTIALS`(schannel 拿不到凭据),而 Python 自带 OpenSSL 正常。
+  所以下载脚本是 Python 而不是 .ps1;开机自启也用 Python + pywin32 而不是 .ps1。
+- **PowerShell 5.1 读 UTF-8 无 BOM 的中文脚本会解析失败**:含中文的 .ps1 要用 pwsh 7 跑。
+- **`FaceLandmarker.close()` 要 42 秒**(而模型创建只要 0.1 秒)。退出路径上同步 close
+  会让"关程序"变成"卡死 40 秒",诊断脚本更会被误判成挂住 —— 一律用
+  `perception.close_async()`。
+- **不要在 OpenCV 里写属性魔数**:`cap.set(4, 1)` 的本意是"缓冲 1 帧",
+  但 4 是 `CAP_PROP_FRAME_HEIGHT`,等于把画面高度设成 1 像素,采集速率直接掉到 2 Hz。
+  要用 `cv2.CAP_PROP_BUFFERSIZE`。
+- **640x480 下人脸检出率是 0%**:Pose 给出的头部框只有 47x52 像素,脸太小。
+  必须 1280x720 采集 + 用 Pose 定位头部后裁剪放大再跑人脸检测(实测 100% 检出)。
+- **不支持的采集分辨率会把 `cap.read()` 永久卡死**(1920x1080 实测卡死 5 分钟以上),
+  所以分辨率只能从实测过的组合里选。
+- **本机有 OBS 虚拟摄像头**(设备索引 2):它输出静帧占位图,而且**饱和度很鲜艳**,
+  会骗过"按饱和度挑彩色摄像头"的判据。真摄像头是索引 0,红外(灰度)是索引 1。
+  所以选设备必须人眼确认,并且判据里加了"帧间动态度"。
