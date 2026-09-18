@@ -207,8 +207,26 @@ scripts/
 2. **PowerShell 的 TLS 在这台机器上是坏的** → 所有下载用 Python(`urllib`,自带 OpenSSL)。
 3. **PowerShell 5.1 读 UTF-8 无 BOM 的中文 .ps1 会解析失败** → 用 pwsh 7 跑,或干脆写成 .py。
 4. **本仓库部分文件上,文件编辑工具会报 `ReplaceFileW EIO (Win32 1175)`**
-   (`config.toml`、`PROGRESS.md` 出现过)。绕法:
+   (`config.toml`、`PROGRESS.md` 出现过, 都是工作区**根目录**下、刚被写过的文件)。
+   `1175 = ERROR_UNABLE_TO_REMOVE_REPLACED` —— 编辑工具用 `ReplaceFileW` 做原子替换,
+   而"移除被替换的那个文件"这一步失败了。
+
+   **已查证(2026-09-18, 别再重复查)**:
+   - **不是我们的程序占用**:`config.toml` 只在监控热重载时被读 ~1ms/60s;
+   - **不是持久锁**:改名探针 40/40 次成功(改名需要的 DELETE 权限正是 ReplaceFile 需要的那一步),
+     连"刚写完立刻改名"也 40/40 成功;
+   - **不是 OneDrive 专有**:`[IO.File]::Replace` 在 %TEMP%(OneDrive 之外)一样被拒 ——
+     因为**沙箱本身对子进程拦了这个 API**,所以从 pwsh 里根本复现不到编辑工具那个错误;
+   - OneDrive 确实在跑(该目录位于含同步根标记 `.849C9593-…` 的 OneDrive 树下), 但其日志里
+     **没有出现过本项目**;Defender 状态查询被拒(WinDefend 服务查不到)。两者都**未能证实**。
+
+   **结论**:是环境/工具链层面的原子替换被拦, **与项目代码无关**, 且是偶发的
+   (同一个文件隔一会儿重试往往就成功)。**别再花时间追根因。**
+
+   **绕法**(已验证可靠):
    `Get-Content -Raw` → `-replace` → `Set-Content` 到 `xxx.new` → `Move-Item -Force`。
+   它走 `MoveFileEx(REPLACE_EXISTING)`:把新文件**改名盖上去**, 不需要"删除"目标文件,
+   所以不受这个限制。等价的 Python 写法是 `os.replace()`。
    另外:harness 要求**先 read 再 edit**(否则报 `file has not been read`),而 read 状态会
    在某些操作后失效 —— 报错就重新 read 一次,别怀疑文件坏了。
 5. **`pythonw` 下 stdout 是"存在但没人看"**(不报错,内容消失)。所以必须有文件日志
