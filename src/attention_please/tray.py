@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -134,9 +135,23 @@ class Tray:
             self.rt.ui.show_report(f"attention_please — {today} 专注日报",
                                    text or "", str(path))
         except Exception as exc:  # noqa: BLE001
-            ok, how = open_path(path)
-            self._notify(f"窗口显示失败({exc}), 已改用 {how}" if ok
-                         else f"日报在 {path}(打不开: {how})")
+            self._fallback_open(path, f"窗口显示失败({exc})")
+            return
+        # UI 线程可能"起来的那一刻就死了"(Tk 起不来: 没有桌面会话 / Tcl 坏了 / 自启太早)。
+        # 那种情况下 show_report 只是把请求塞进队列然后永远不动, 而它**不会抛异常** ——
+        # 于是下面那个 except 分支永远走不到, 表现就是"点了没反应"(§6 #10 重现)。
+        # 所以这里等一小会儿看一眼: 线程活着就说明请求会被处理。
+        for _ in range(10):
+            if getattr(self.rt.ui, "alive", False):
+                return
+            time.sleep(0.05)
+        self._fallback_open(path, "提醒窗口起不来")
+
+    def _fallback_open(self, path: Path, why: str) -> None:
+        """自己的窗口用不了时, 退到系统默认程序打开 —— 总之不能让用户"点了没反应"。"""
+        ok, how = open_path(path)
+        self._notify(f"{why}, 已改用 {how}" if ok
+                     else f"日报在 {path}(打不开: {how})")
 
     def _open_captures(self) -> None:
         target = self.rt.cfg.capture_dir

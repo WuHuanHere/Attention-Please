@@ -19,8 +19,12 @@ HANDOFF §9 M4 第 2 条: 校准测出的眨眼基线是 **3.0 次/分**(正常�
 - `WindowStats` 中位数 / MAD / 四分位 —— 用中位数而不是均值, 因为要能扛住
   "部分出画时肩宽从 240px 掉到 96px"这种离群帧;
 - `Baseline`    带**可信样本闸门**(`trusted=False` 的样本不进窗)与**最小样本数**
-  (样本不够就 `ready()=False`, 让上层**弃权**而不是猜);
-- `deadband()`  `k * MAD` 但**不小于 floor** —— 基线太干净时不许变成风吹草动就触发。
+  (样本不够就 `ready()=False`, 让上层**弃权**而不是猜)。
+
+⚠️ 曾经这里还有一个 `deadband()`(`k * MAD` 但不小于 floor)。**它已经被删掉了**,
+别再照着它写判据: 实测"直立"样本的 bow 本身就在 0.35-0.78 之间铺开(坐姿/距离的
+真实差异, 不是噪声), `k*MAD` 死区高达 0.39, 比"低头"造成的位移(0.35)还大 ——
+真低头反而判不出来。现在 `pose_head` 用的是**分位数范围**(p10/p90), 见它的模块注释。
 """
 from __future__ import annotations
 
@@ -168,14 +172,3 @@ class Baseline:
     def clear(self) -> None:
         self.window.clear()
         self._last_ts = None
-
-    def deadband(self, now: float, k: float, floor: float) -> float:
-        """`k * spread`, 但不小于 `floor`。
-
-        没有 floor 的话, 一段特别平稳的样本会把死区压到接近 0, 于是
-        "比基线低 0.01" 也会被判成低头 —— 那是纯噪声。
-        """
-        st = self.window.stats(now)
-        if st is None:
-            return float(floor)
-        return max(float(floor), k * st.spread)

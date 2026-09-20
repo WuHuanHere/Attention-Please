@@ -104,7 +104,10 @@ class Schedule:
                 continue
             start = b.start.hour * 3600 + b.start.minute * 60 + b.start.second
             end = b.end.hour * 3600 + b.end.minute * 60 + b.end.second
-            if end <= start:      # 跨午夜
+            # ⚠️ 必须是 `<` 而不是 `<=`: `start == end` 的块(`contains()` 判定为空区间,
+            # 永远不命中)如果走 `<=`, 会被 `end += 86400` 算成 **24 小时计划**,
+            # 日报的"计划学习时长"直接变成一天, 还会冒出一条"约 24 小时没有监控数据"的假警告。
+            if end < start:       # 跨午夜
                 end += 86400
             total += end - start
         return total
@@ -122,7 +125,7 @@ class Schedule:
                 continue
             start = b.start.hour * 3600 + b.start.minute * 60 + b.start.second
             end = b.end.hour * 3600 + b.end.minute * 60 + b.end.second
-            if end <= start:
+            if end < start:       # 跨午夜(同 planned_seconds: start==end 是空块)
                 end += 86400
             if now_s <= start:
                 continue

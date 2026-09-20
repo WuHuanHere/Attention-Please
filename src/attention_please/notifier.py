@@ -51,6 +51,12 @@ class Notifier:
         with self._lock:
             now = time.monotonic()
             if now - self._last_played < self.min_gap_seconds:
+                # 同一个 tick 里两条提醒(比如"头转向手机"和"切到黑名单窗口"同时越过门槛)
+                # 时第二声会被压掉。压掉可以, **但不能一声不响** —— 用户只听到一声,
+                # 而事件流里两条都在, 事后对不上账。
+                safe_print(f"   (提醒声被最小间隔压掉: 距上一声 "
+                           f"{now - self._last_played:.1f}s < {self.min_gap_seconds}s; "
+                           f"提醒本身已经入库了)")
                 return
             self._last_played = now
             for freq, dur in pattern:

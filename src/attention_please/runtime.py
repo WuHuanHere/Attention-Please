@@ -17,7 +17,6 @@ import socket
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -58,16 +57,6 @@ SUMMARY_EVERY_SECONDS = 300
 # 2 秒既远小于 busy timeout(托盘写基本不会撞锁), 又比原来多 15 倍落盘频率:
 # 蓝屏最多丢 2 秒, 而不是 30 秒。
 FLUSH_EVERY_SECONDS = 2.0
-
-
-@dataclass
-class Counters:
-    judging_started: datetime | None = None
-    distract_seconds: float = 0.0
-    pause_seconds: float = 0.0
-    away_seconds: float = 0.0
-    nudges: int = 0
-    episodes: int = 0
 
 
 def acquire_single_instance() -> socket.socket | None:
@@ -113,7 +102,6 @@ class Runtime:
         self.notifier = Notifier()
         self.ui = AlertUI()
         self.sm = FocusStateMachine(cfg, cal)
-        self.counters = Counters()
         self.analyzer: FrameAnalyzer | None = None
         self.cap = None
         self.cam_info: CameraInfo | None = None
@@ -291,7 +279,6 @@ class Runtime:
             duration = max(0.0, (now - self.pause_started).total_seconds())
             reason = self.pause_reason
             self.pause_started = now if reopen else None
-        self.counters.pause_seconds += duration
         self._log_span("pause_end", start_at=now - timedelta(seconds=duration),
                        end_at=now, duration=duration, detail=reason)
         return duration
@@ -371,6 +358,16 @@ class Runtime:
         self.cam_info = CameraInfo(index=self.cfg.general.camera_index, opened=True,
                                    backend=backend,
                                    width=int(cap.get(3)), height=int(cap.get(4)))
+        # **校验设备实际给的分辨率**。以前 cam_info 存下来就再没人读过, 于是启动横幅
+        # 永远打印 config.toml 里的值 —— 而 640x480 下实测人脸检出率是 **0%**
+        # ("看手机"和 Pose 通道会直接失效)。摄像头静默回落到低分辨率时, 日志必须说真话。
+        want = (self.cfg.general.camera_width, self.cfg.general.camera_height)
+        got = (self.cam_info.width, self.cam_info.height)
+        if got != want and got[0] > 0:
+            self._say(f"⚠️ 摄像头实际给的是 {got[0]}x{got[1]}, 不是配置的 "
+                      f"{want[0]}x{want[1]} —— 人脸检出率可能大幅下降"
+                      f"(实测 640x480 下是 0%)")
+            self._log("camera_resolution_mismatch", detail=f"{got[0]}x{got[1]}")
         if self.cam_fail_since is not None:
             dur = (datetime.now() - self.cam_fail_since).total_seconds()
             self._log("camera_busy_end", duration=dur)
@@ -677,7 +674,6 @@ class Runtime:
             self.log.write("派发: " + "; ".join(describe_action(a) for a in actions))
         for act in actions:
             if isinstance(act, Nudge):
-                self.counters.nudges += 1
                 title = foreground.foreground_title() or ""
                 # **先记账, 再提醒**: 提醒通道(声音/弹窗)出任何问题都不能丢掉这条记录。
                 # 2026-09-17 那 3 次"该响却没响"的 L3 之所以无从查证, 就是因为顺序反了 ——
@@ -720,8 +716,6 @@ class Runtime:
                 if not act.record_only:
                     self._capture(act, frame)
             elif isinstance(act, EpisodeEnd):
-                self.counters.episodes += 1
-                self.counters.distract_seconds += act.duration
                 self._say(f"[{act.at:%H:%M:%S}] ⏹ 分心结束, 持续 {act.duration:.0f} 秒"
                       f"(最高 L{act.max_level})")
                 flags = [f for f, on in (("record_only", act.record_only),
@@ -736,7 +730,6 @@ class Runtime:
                     self._say(f"[{act.at:%H:%M:%S}] 💤 离开座位(只记录, 不提醒)")
                     self._log("away_start")
                 else:
-                    self.counters.away_seconds += act.duration
                     self._say(f"[{act.at:%H:%M:%S}] 👋 回到座位(离开 {act.duration / 60:.1f} 分钟)")
                     self._log_span("away_end",
                                    start_at=act.at - timedelta(seconds=act.duration),

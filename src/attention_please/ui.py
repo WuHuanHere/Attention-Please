@@ -131,7 +131,20 @@ class AlertUI:
         import tkinter as tk
         import traceback
 
-        root = tk.Tk()
+        # Tk 起不来时(没有可用的桌面会话 / Tcl 坏了 / 开机自启跑得太早)**必须说出来**。
+        # 这一行以前在任何 try 之外: 线程直接死掉, last_ui_error 是空的、一个事件都不发,
+        # 之后每次 show() 都只是再起一个秒死的线程, 请求永远排在队列里 ——
+        # 表现就是"点了没反应", 而且哪儿都查不到原因。
+        try:
+            root = tk.Tk()
+        except Exception as exc:  # noqa: BLE001
+            self.last_ui_error = f"tk-init: {type(exc).__name__}: {exc}"
+            self._emit("ui_error", self.last_ui_error)
+            try:
+                print(f"[ui] Tk 起不来, 提醒窗口不可用: {type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+            return
         root.withdraw()
         root.title("attention_please")
 
@@ -165,21 +178,32 @@ class AlertUI:
             """窗口以任何方式被销毁(按钮/X/外部)都要复位 —— 见模块开头的陷阱 2。"""
             if event.widget is not state.get("win"):
                 return                      # <Destroy> 会冒泡, 忽略子控件
+            was_asking = state.get("ask") is not None
             reset_state()
+            if was_asking:
+                # 点 X 关掉「暂停理由」输入框 = 取消暂停。以前这里什么都不发, 于是
+                # runtime 一直以为你没暂停, 库和日志里也一个字都没有 —— 用户看着框没了,
+                # 以为暂停生效了, 起身走人, 然后被"离开太久"提醒。
+                self._emit("reason_cancelled")
 
         def track(win) -> None:
             win.bind("<Destroy>", on_destroy, add="+")
             state["win"] = win
             self.windows_shown += 1
 
-        def close_window() -> None:
+        def close_window(notify_cancel: bool = False) -> None:
+            """关掉当前窗口。`notify_cancel=True` 时, 如果关的是"暂停理由"输入框,
+            要发一条 `reason_cancelled` —— 别的窗口(提醒/日报)顶掉它时就是这种情况。"""
             win = state.get("win")
+            was_asking = state.get("ask") is not None
             reset_state()                   # 先复位, 再销毁(销毁会触发 <Destroy>, 幂等)
             if win is not None:
                 try:
                     win.destroy()  # type: ignore[attr-defined]
                 except Exception:  # noqa: BLE001
                     pass
+            if was_asking and notify_cancel:
+                self._emit("reason_cancelled")
 
         def on_dismiss() -> None:
             if state.get("signal"):
@@ -212,7 +236,7 @@ class AlertUI:
 
         # ---- 三类窗口 ----
         def show_alert(req: AlertRequest) -> None:
-            close_window()
+            close_window(notify_cancel=True)
             win = tk.Toplevel(root)
             win.attributes("-topmost", True)
             win.title(f"attention_please — 第 {req.level} 级提醒")
@@ -252,7 +276,7 @@ class AlertUI:
                 countdown.configure(text="(不会自动关闭)")
 
         def show_ask(req: AskRequest) -> None:
-            close_window()
+            close_window(notify_cancel=True)
             win = tk.Toplevel(root)
             win.attributes("-topmost", True)
             win.title(req.title)
@@ -292,7 +316,7 @@ class AlertUI:
             state["autoclose"] = False
 
         def show_report_window(req: ReportRequest) -> None:
-            close_window()
+            close_window(notify_cancel=True)
             win = tk.Toplevel(root)
             win.attributes("-topmost", True)
             win.title(req.title)

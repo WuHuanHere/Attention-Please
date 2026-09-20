@@ -127,6 +127,49 @@ class TestUiLifecycle(unittest.TestCase):
         self.assertEqual(self.ui.last_ui_error, "",
                          f"UI 线程报了错: {self.ui.last_ui_error}")
 
+    # ---- 暂停输入框被顶掉 / 点 X: 必须发 reason_cancelled ----
+    def test_alert_replacing_the_pause_dialog_reports_cancellation(self):
+        """正在输暂停理由时来了升级提醒 -> 输入框被顶掉, 必须发 reason_cancelled。
+
+        以前这种情况**什么都不发**: runtime 一直以为你没暂停, 库和日志里一个字都没有,
+        而用户看着框没了, 以为暂停生效了, 起身走人, 然后被"离开太久"提醒。
+        """
+        self.ui.ask_reason("暂停监控", "为什么?")
+        self.assertTrue(wait_for(lambda: self.ui.windows_shown >= 1))
+        time.sleep(0.4)
+        self.assertEqual(self.ui.drain(), [], "还没被顶掉就不该有事件")
+
+        self.ui.show(AlertRequest(title="提醒", body="b", signal="screen", level=2,
+                                  auto_close_seconds=60))
+        self.assertTrue(wait_for(lambda: self.ui.windows_shown >= 2))
+        time.sleep(0.5)
+        kinds = [k for k, _ in self.ui.drain()]
+        self.assertIn("reason_cancelled", kinds,
+                      f"暂停框被顶掉了却没有通知 runtime: {kinds}")
+
+    def test_x_close_of_pause_dialog_reports_cancellation(self):
+        self.ui.ask_reason("暂停监控", "为什么?")
+        self.assertTrue(wait_for(lambda: self.ui.windows_shown >= 1))
+        time.sleep(0.4)
+        self.ui.drain()
+        self.ui.destroy_current_window_for_test()       # 模拟点 X
+        time.sleep(0.6)
+        kinds = [k for k, _ in self.ui.drain()]
+        self.assertEqual(kinds, ["reason_cancelled"],
+                         f"X 关掉暂停框没有(或重复)通知 runtime: {kinds}")
+
+    def test_x_close_of_a_plain_alert_is_not_a_cancellation(self):
+        """对照组: 关掉普通提醒窗不该被当成"取消暂停"。"""
+        self.ui.show(AlertRequest(title="提醒", body="b", signal="screen", level=2,
+                                  auto_close_seconds=60))
+        self.assertTrue(wait_for(lambda: self.ui.windows_shown >= 1))
+        time.sleep(0.4)
+        self.ui.drain()
+        self.ui.destroy_current_window_for_test()
+        time.sleep(0.6)
+        kinds = [k for k, _ in self.ui.drain()]
+        self.assertNotIn("reason_cancelled", kinds, f"普通提醒窗被误判成取消暂停: {kinds}")
+
 
 if __name__ == "__main__":
     unittest.main()

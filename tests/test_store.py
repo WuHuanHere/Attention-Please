@@ -89,10 +89,18 @@ class TestStore(unittest.TestCase):
 
     def test_top_titles_before(self):
         for _ in range(3):
-            self.store.event("nudge", at=at(9, 0), detail="哔哩哔哩 - Chrome")
-        self.store.event("nudge", at=at(9, 5), detail="Steam")
+            self.store.event("nudge", at=at(9, 0), signal="screen",
+                             detail="哔哩哔哩 - Chrome")
+        self.store.event("nudge", at=at(9, 5), signal="screen", detail="Steam")
         top = self.store.top_titles_before(DAY)
         self.assertEqual(top[0], ("哔哩哔哩 - Chrome", 3))
+
+    def test_top_titles_before_ignores_phone_and_away(self):
+        """看手机/离开座位时, 前台窗口标题跟"为什么分心"毫无关系, 不许混进来。"""
+        self.store.event("nudge", at=at(9, 0), signal="screen", detail="哔哩哔哩")
+        self.store.event("nudge", at=at(9, 1), signal="phone", detail="系统托盘溢出窗口。")
+        self.store.event("nudge", at=at(9, 2), signal="away", detail="Visual Studio Code")
+        self.assertEqual(self.store.top_titles_before(DAY), [("哔哩哔哩", 1)])
 
     def test_reopen_persists(self):
         self.store.event("nudge", at=at(9, 0), level=1)

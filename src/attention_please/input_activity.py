@@ -17,6 +17,15 @@ if sys.platform == "win32":
     _user32 = ctypes.windll.user32
     _kernel32 = ctypes.windll.kernel32
 
+    # ⚠️ **必须显式声明返回类型**。ctypes 不声明时默认 restype 是 `c_int`(有符号 32 位),
+    # 而 `GetTickCount()` 返回的是 DWORD —— 开机满 2^31 毫秒(约 **24.85 天**)之后,
+    # 它会被读成负数, 于是 `now - info.dwTime` 恒为负, `idle_seconds()` **永远返回 0**,
+    # 「已 N 秒没有键鼠操作」这句证据文案就再也不会出现(实测模拟 25 天: 返回 0.0)。
+    _kernel32.GetTickCount.restype = wintypes.DWORD
+    _kernel32.GetTickCount.argtypes = []
+    _user32.GetLastInputInfo.argtypes = [ctypes.POINTER(_LASTINPUTINFO)]
+    _user32.GetLastInputInfo.restype = wintypes.BOOL
+
     def idle_seconds() -> float:
         info = _LASTINPUTINFO()
         info.cbSize = ctypes.sizeof(_LASTINPUTINFO)

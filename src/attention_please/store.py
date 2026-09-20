@@ -408,10 +408,18 @@ class Store:
         return sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)[:top]
 
     def top_titles_before(self, day: str, top: int = 5) -> list[tuple[str, int]]:
+        """分心前在看什么窗口。
+
+        **只统计 `screen` 的提醒**: 另外两类的 `detail` 是"当时的前台窗口标题",
+        跟"为什么分心"毫无关系 —— 看手机时前台可能是「系统托盘溢出窗口。」,
+        离开座位时可能是你走之前那个窗口。混进来只会误导调参
+        (实测榜上出现过 `'视频播放'`、`'Visual Studio Code'`)。
+        """
         self._fresh_read()
         cur = self.conn.execute(
             "SELECT detail, COUNT(*) FROM event WHERE day = ? AND kind = 'nudge'"
-            " AND detail IS NOT NULL GROUP BY detail ORDER BY COUNT(*) DESC LIMIT ?",
+            " AND signal = 'screen' AND detail IS NOT NULL"
+            " GROUP BY detail ORDER BY COUNT(*) DESC LIMIT ?",
             (day, top))
         return [(d, n) for d, n in cur.fetchall()]
 

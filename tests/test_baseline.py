@@ -126,22 +126,13 @@ class TestBaseline(unittest.TestCase):
         b.observe(1.1, 3.0)                  # 若被推进到 0.9 这里就会被抽稀掉
         self.assertEqual(b.window.values(), [1.0, 3.0])
 
-    def test_deadband_has_floor(self):
-        """基线特别平稳时, 死区必须由 floor 兜住, 否则纯噪声也能触发。"""
-        b = Baseline(seconds=100, min_samples=1)
-        for i in range(30):
-            b.observe(float(i), 0.42)        # 完全不动 -> MAD=0
-        self.assertEqual(b.deadband(30.0, k=2.5, floor=0.04), 0.04)
+    def test_deadband_is_gone(self):
+        """`deadband()`(k*MAD 死区)已删除 —— 它比"低头"造成的位移还大, 判不出低头。
 
-    def test_deadband_scales_with_mad(self):
-        b = Baseline(seconds=100, min_samples=1)
-        for i, v in enumerate([0.30, 0.40, 0.50, 0.60]):
-            b.observe(float(i), v)
-        band = b.deadband(10.0, k=2.5, floor=0.01)
-        self.assertGreater(band, 0.10)       # 2.5 * MAD(~0.1)
-
-    def test_deadband_falls_back_to_floor_when_empty(self):
-        self.assertEqual(Baseline(seconds=100).deadband(0.0, 2.5, 0.04), 0.04)
+        现在 pose_head 用的是基准的分位数范围(p10/p90)。这条测试守着"别把它加回来"。
+        """
+        self.assertFalse(hasattr(Baseline(seconds=100), "deadband"),
+                         "deadband 又被加回来了? 先看 baseline.py 的模块注释")
 
     def test_clear_resets_everything(self):
         b = Baseline(seconds=100, min_samples=1, min_interval=1.0)
