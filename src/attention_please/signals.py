@@ -141,6 +141,10 @@ class EpisodeEnd:
     max_level: int
     record_only: bool
     evidence: str = ""
+    # 用户点了「判定错了」-> 这一段是误报。**必须能从事件里看出来**:
+    # 以前 report_wrong 只设了静默, 于是用户已经明确判为误报的那段分心照样累计时长、
+    # 照样从有效专注里扣掉, 而日报还并列写着"你标记了 1 次误判"。
+    wrong: bool = False
 
 
 @dataclass
@@ -268,9 +272,29 @@ class FocusStateMachine:
             SignalKind.AWAY: d.away_reminder_seconds,
         }[signal]
 
-    def report_wrong(self, signal: SignalKind, now_ts: float) -> None:
-        """用户点了"判定错了": 立刻结束分集, 该信号静默一段时间, 并留给调参用。"""
-        self.tracks[signal].muted_until = now_ts + self.cfg.reminder.wrong_feedback_mute_seconds
+    def report_wrong(self, signal: SignalKind, now_ts: float,
+                     now_at: datetime) -> list[Action]:
+        """用户点了「判定错了」: **立刻结束分集**(并标记成误报), 该信号静默一段时间。
+
+        以前这里只设了 `muted_until`, 而 docstring 却写着"立刻结束分集" —— 结果是:
+        用户已经明确判定为误报的那段分心继续累计时长, 照样从有效专注里扣掉,
+        而日报还并列印着"你标记了 1 次误判"。现在真的把它结掉并打上 `wrong` 标记,
+        由 `store.day_stats` 把它从分心时长里剔除(时长单列, 仍然可见)。
+        """
+        tr = self.tracks[signal]
+        tr.muted_until = now_ts + self.cfg.reminder.wrong_feedback_mute_seconds
+        actions: list[Action] = []
+        if tr.episode_start is not None:
+            start = tr.signal_start if tr.signal_start is not None else tr.episode_start
+            actions.append(EpisodeEnd(signal, now_at, now_ts, max(0.0, now_ts - start),
+                                      tr.max_level, tr.record_only, tr.evidence,
+                                      wrong=True))
+            tr.episode_start = None
+            tr.signal_start = None
+            tr.level_emitted = 0
+            tr.active_since = None
+            tr.last_active_ts = None
+        return actions
 
     def suspend(self, now_ts: float, now_at: datetime, reason: str = "suspend") -> list[Action]:
         """暂停/离开时间表/摄像头被占用: 关掉所有进行中的分集, 不报警。"""

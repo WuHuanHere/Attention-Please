@@ -215,14 +215,16 @@ class TestCooldownAndFeedback(unittest.TestCase):
         sm = FocusStateMachine(make_cfg(), CAL)
         acts = run(sm, [(t, {"title": "Steam"}) for t in range(0, 12)])
         self.assertEqual(len(nudges(acts)), 1)
-        sm.report_wrong(SignalKind.SCREEN, 12)
+        ended = sm.report_wrong(SignalKind.SCREEN, 12, BASE + timedelta(seconds=12))
+        self.assertTrue(any(getattr(a, "wrong", False) for a in ended),
+                        "report_wrong 必须把那一段按误报结掉, 不能只静默")
         acts2 = run(sm, [(t, {"title": "Steam"}) for t in range(13, 300, 5)])
         self.assertEqual(nudges(acts2), [])
 
     def test_wrong_feedback_only_mutes_that_signal(self):
         sm = FocusStateMachine(make_cfg(), CAL)
         run(sm, [(t, {"title": "Steam"}) for t in range(0, 12)])
-        sm.report_wrong(SignalKind.SCREEN, 12)
+        sm.report_wrong(SignalKind.SCREEN, 12, BASE + timedelta(seconds=12))
         acts = run(sm, [(t, {"yaw": 50.0}) for t in range(13, 40)])
         self.assertEqual(nudges(acts), [(SignalKind.PHONE, 1)])
 

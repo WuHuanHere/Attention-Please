@@ -118,18 +118,23 @@ def cleanup(capture_dir: Path, retention_days: int = 7) -> int:
     return removed
 
 
-def clear_all(capture_dir: Path) -> int:
-    """托盘上的"清空所有截图"。"""
+def clear_all(capture_dir: Path) -> tuple[int, int]:
+    """托盘上的"清空所有截图"。返回 `(删掉的张数, 没删掉的张数)`。
+
+    **必须把失败数也返回**: Windows 上文件被看图软件/杀毒/索引器打开着时
+    `unlink()` 会抛 OSError。以前这里只数成功的, 于是托盘提示「已清空 2 张」而
+    第 3 张还在硬盘上 —— 用户以为隐私数据清干净了, 其实没有, 而且哪儿都没说。
+    """
     if not capture_dir.exists():
-        return 0
-    removed = 0
+        return 0, 0
+    removed = failed = 0
     for path in capture_dir.glob("*.jpg"):
         try:
             path.unlink()
             removed += 1
         except OSError:
-            continue
-    return removed
+            failed += 1
+    return removed, failed
 
 
 def newest(capture_dir: Path) -> Path | None:

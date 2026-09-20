@@ -694,8 +694,11 @@ class Runtime:
                 self.counters.distract_seconds += act.duration
                 self._say(f"[{act.at:%H:%M:%S}] ⏹ 分心结束, 持续 {act.duration:.0f} 秒"
                       f"(最高 L{act.max_level})")
+                flags = [f for f, on in (("record_only", act.record_only),
+                                         ("wrong", act.wrong)) if on]
                 self._log_span("episode_end", signal=act.signal.value,
                                level=act.max_level, evidence=act.evidence,
+                               detail=",".join(flags) or None,
                                start_at=act.at - timedelta(seconds=act.duration),
                                end_at=act.at, duration=act.duration)
             elif isinstance(act, AwayChange):
@@ -746,17 +749,28 @@ class Runtime:
                     sk = SignalKind(value)
                 except ValueError:
                     continue
-                self.sm.report_wrong(sk, mono)
+                # report_wrong 会返回"把这段误报结掉"的动作, **必须 dispatch** ——
+                # 否则它只是静默了信号, 那段误报照样计进分心时长。
+                self.dispatch(self.sm.report_wrong(sk, mono, datetime.now()))
                 minutes = self.cfg.reminder.wrong_feedback_mute_seconds // 60
                 self._say(f"   判定错了 -> {SIGNAL_LABEL[sk]} 静默 {minutes} 分钟"
-                      f"(已入库; 不自动调参, 攒够样本后人工调阈值)")
+                      f"(这一段已按误报剔除, 不再扣你的专注; 不自动调参, 攒够样本后人工调阈值)")
                 self._log("wrong", signal=value)
             elif kind == "reason":
                 self.pause(value, datetime.now())
             elif kind == "reason_cancelled":
                 self._say("   已取消暂停(没写理由就不给暂停)")
-            else:
+            elif kind == "ui_error":
+                # 弹窗通道**自己**炸了 = 提醒可能根本没弹出来。这是"漏报", 必须一眼可见:
+                # 以前它落进下面的 else 分支, 被记成 alert_dismissed(等同于"用户点了我回来了"),
+                # 事件流里完全看不出 UI 已经坏了(实测: TclError 被记成 alert_dismissed)。
+                self._say(f"⚠️ 提醒窗口出错(提醒可能没弹出来): {value}")
+                self._log("ui_error", detail=value)
+            elif kind == "dismissed":
                 self._log("alert_dismissed", signal=value)
+            else:
+                # 未知类型也如实记成它自己 —— 绝不能一律当成"用户点了我回来了"
+                self._log(kind or "ui_event", signal=value)
 
     # ---- 配置热重载 ----
     def _maybe_reload_config(self, mono: float, now: datetime) -> None:

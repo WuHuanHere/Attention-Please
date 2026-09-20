@@ -148,9 +148,14 @@ class Tray:
             self._notify(f"打开文件夹失败({how});路径 {target}")
 
     def _clear_captures(self) -> None:
-        removed = capture.clear_all(self.rt.cfg.capture_dir)
-        print(f"已清空 {removed} 张截图")
-        self._notify(f"已清空 {removed} 张分心截图")
+        removed, failed = capture.clear_all(self.rt.cfg.capture_dir)
+        print(f"已清空 {removed} 张截图" + (f", {failed} 张没删掉" if failed else ""))
+        if failed:
+            # 隐私功能**不许报假成功**: 文件多半正被看图软件/杀毒打开着, 关掉再试。
+            self._notify(f"删掉了 {removed} 张, 但还有 {failed} 张删不掉"
+                         f"(多半被看图软件/杀毒占用, 关掉它再点一次)")
+        else:
+            self._notify(f"已清空 {removed} 张分心截图")
 
     def _quit(self) -> None:
         self.rt.stop()

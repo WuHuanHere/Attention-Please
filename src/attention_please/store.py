@@ -75,6 +75,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             pass          # 加不上就退回旧口径(day_stats 里有兜底), 绝不让程序起不来
 
 
+def _flag_set(detail: str | None) -> set[str]:
+    """把 `event.detail` 里的标记拆成集合(episode_end 用它带 record_only / wrong)。
+
+    以前 `episode_end` **什么都不带**, 于是 store 分不出"被策略允许的手机使用"
+    和真分心 —— 背单词时段用手机 App 会被当成摸鱼扣掉有效专注(实测复现过)。
+    """
+    return {t.strip() for t in (detail or "").split(",") if t.strip()}
+
+
 def _subtract_spans(secs: float, start: float,
                     spans: list[tuple[float, float]]) -> float:
     """从区间 `[start, start+secs)` 里扣掉与 `spans` 重叠的部分, 返回剩下的秒数。
@@ -105,6 +114,13 @@ class DayStats:
     unfinished_episodes: int = 0
     # 同上, 但针对"离开座位": 有 away_start 没有 away_end。那段离开时长同样是未知的。
     unfinished_away: int = 0
+    # 被策略**允许**的手机使用(allow_phone 时段, 例如背单词用手机 App)。
+    # 它只记录不报警, 所以**不算分心** —— 但也不能假装没发生, 日报要单列出来。
+    allowed_phone_seconds: float = 0.0
+    # 用户点了「判定错了」而被剔除的分心时长(那段连时长一起不算)。
+    wrong_seconds: float = 0.0
+    # 弹窗通道自己报错的次数。提醒没弹出来属于"漏报", 必须在日报里能看见。
+    ui_errors: int = 0
     nudges: int = 0
     away_nudges: int = 0              # "离开太久"的提醒次数(单独统计, 不算分心提醒)
     episodes: int = 0
@@ -247,8 +263,8 @@ class Store:
         ends: dict[str, int] = {}
         away_starts = away_ends = 0
         cur = self.conn.execute(
-            "SELECT kind, signal, level, duration FROM event WHERE day = ?", (day,))
-        for kind, signal, _level, duration in cur.fetchall():
+            "SELECT kind, signal, level, duration, detail FROM event WHERE day = ?", (day,))
+        for kind, signal, _level, duration, detail in cur.fetchall():
             duration = duration or 0.0
             if kind == "episode_start":
                 starts[signal] = starts.get(signal, 0) + 1
@@ -263,6 +279,18 @@ class Store:
                     # 转头", 精度低到连一声提醒都不配(见 signals.max_level_for)。
                     # 算进分心会让"低头写题"直接变成"分心", 那正是最烦的误报。
                     st.pose_weak_seconds += duration
+                    continue
+                flags = _flag_set(detail)
+                if "wrong" in flags:
+                    # 用户明确说了"这是误报" —— 不能再拿它扣有效专注,
+                    # 否则日报会一边写"你标记了 1 次误判"一边照样收你那段的分心时长。
+                    st.wrong_seconds += duration
+                    continue
+                if "record_only" in flags:
+                    # allow_phone 时段(背单词)的"看手机": 策略明确允许, 只记录不报警。
+                    # 它**不算分心**(否则背单词用手机 App 会被当成摸鱼扣掉专注),
+                    # 但也不能消失 —— 单列出来给日报。
+                    st.allowed_phone_seconds += duration
                     continue
                 st.episodes += 1
                 st.distract_seconds += duration
@@ -280,6 +308,9 @@ class Store:
                 st.pause_seconds += duration
             elif kind == "wrong":
                 st.wrong_feedback += 1
+            elif kind == "ui_error":
+                # 弹窗通道自己炸了 = 提醒可能根本没弹出来。这是"漏报", 必须可见。
+                st.ui_errors += 1
             elif kind == "camera_busy_end":
                 st.camera_busy_seconds += duration
             elif kind == "camera_yield_end":

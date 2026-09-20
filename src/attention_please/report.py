@@ -86,6 +86,13 @@ def build_report(cfg: Config, store: Store, day: str,
         # 不写出来的话, 这一行会和下面"提醒次数"自相矛盾(提醒响过, 分心却是 0 次)
         distract_txt += f" + **{st.unfinished_episodes} 段没等到收尾**"
     lines.append(f"| 分心 | {distract_txt} |")
+    if st.allowed_phone_seconds:
+        # 背单词时段用手机 App 是**策略允许**的, 不算分心 —— 但也不能假装没发生
+        lines.append(f"| 其中「允许用手机」时段 | {_hm(st.allowed_phone_seconds)}"
+                     f"(只记录, 不算分心) |")
+    if st.wrong_seconds:
+        lines.append(f"| 你判为误报、已剔除 | {_hm(st.wrong_seconds)}"
+                     f"(不计入分心, 也不扣专注) |")
     lines.append(f"| 暂停 | {_hm(st.pause_seconds)} |")
     away_txt = _hm(st.away_seconds) + (f"(提醒过 {st.away_nudges} 次)" if st.away_nudges else "")
     if st.unfinished_away:
@@ -175,6 +182,11 @@ def build_report(cfg: Config, store: Store, day: str,
     if st.wrong_feedback:
         lines.append(f"- 你标记了 {st.wrong_feedback} 次误判 —— 攒够样本后按日志调阈值"
                      f"(程序不自动调参)")
+    if st.ui_errors:
+        # 提醒窗口自己炸了 = 提醒可能没弹出来。这是"漏报", 必须在可信度这一段里出现,
+        # 否则"该弹的窗没弹"会完全不留痕迹。
+        lines.append(f"- ⚠️ 提醒窗口报错 {st.ui_errors} 次 —— 有提醒可能**没有弹出来**, "
+                     f"那几次你只会听到声音(详见日志里的 ui_error)")
     lines.append("")
     lines.append(f"*生成时间 {datetime.now():%Y-%m-%d %H:%M:%S}*")
     lines.append("")

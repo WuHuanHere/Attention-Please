@@ -197,8 +197,8 @@ class TestCapture(unittest.TestCase):
         self.dir.mkdir(parents=True)
         for name in ("a.jpg", "b.jpg"):
             Image.new("RGB", (10, 10)).save(self.dir / name, "JPEG")
-        self.assertEqual(capture.clear_all(self.dir), 2)
-        self.assertEqual(capture.clear_all(self.dir), 0)
+        self.assertEqual(capture.clear_all(self.dir), (2, 0))
+        self.assertEqual(capture.clear_all(self.dir), (0, 0))
 
     def test_newest(self):
         self.dir.mkdir(parents=True)

@@ -114,7 +114,7 @@ class TestCooldown(unittest.TestCase):
     def test_wrong_feedback_overrides_silence_cap(self):
         """你明确说了"判定错了", 那静默上限也不能反过来吵你。"""
         feed(self.sm, 0, 12, DISTRACT)
-        self.sm.report_wrong(SignalKind.SCREEN, 12.0)
+        self.sm.report_wrong(SignalKind.SCREEN, 12.0, datetime(2026, 5, 1, 9, 0, 12))
         acts = feed(self.sm, 12, 300, DISTRACT)
         self.assertEqual(nudges(acts), [])
 
