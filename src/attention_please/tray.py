@@ -71,7 +71,14 @@ class Tray:
         self.rt.request_pause()
 
     def _resume(self) -> None:
-        self.rt.resume(datetime.now())
+        # 和 _yield/_reclaim 一样要有护栏: resume() 先清 paused 再写 pause_end,
+        # 写失败(实测 database is locked)时状态已经恢复了, 但那段暂停**没有落库** ——
+        # 不吭声的话就是"暂停时长和理由凭空消失", 而用户完全看不出来。
+        try:
+            self.rt.resume(datetime.now())
+        except Exception as exc:  # noqa: BLE001
+            self._notify(f"已恢复监控, 但这段暂停没记上账({type(exc).__name__}): "
+                         f"日报里的暂停时长会少这一截")
         self._refresh_icon()
 
     def _manual(self) -> None:

@@ -67,6 +67,8 @@ class DayStats:
     # 有 episode_start 却没有 episode_end 的分集 = **程序在分心过程中被关掉/崩溃/蓝屏**。
     # 它的时长是未知的(不是 0!), 所以只报"有几段", 绝不编一个数字出来 —— 宁可缺, 不可假。
     unfinished_episodes: int = 0
+    # 同上, 但针对"离开座位": 有 away_start 没有 away_end。那段离开时长同样是未知的。
+    unfinished_away: int = 0
     nudges: int = 0
     away_nudges: int = 0              # "离开太久"的提醒次数(单独统计, 不算分心提醒)
     episodes: int = 0
@@ -195,6 +197,7 @@ class Store:
         # 分集的开头/结尾分开数, 用来找"有开头没结尾"的那种(见 unfinished_episodes)。
         starts: dict[str, int] = {}
         ends: dict[str, int] = {}
+        away_starts = away_ends = 0
         cur = self.conn.execute(
             "SELECT kind, signal, level, duration FROM event WHERE day = ?", (day,))
         for kind, signal, _level, duration in cur.fetchall():
@@ -220,7 +223,10 @@ class Store:
                     st.away_nudges += 1
                 else:
                     st.nudges += 1
+            elif kind == "away_start":
+                away_starts += 1
             elif kind == "away_end":
+                away_ends += 1
                 st.away_seconds += duration
             elif kind == "pause_end":
                 st.pause_seconds += duration
@@ -240,6 +246,10 @@ class Store:
         st.unfinished_episodes = sum(
             max(0, n - ends.get(sig, 0)) for sig, n in starts.items()
             if sig in DISTRACTION_SIGNALS)
+        # 离开也一样: 有 away_start 没 away_end -> 那段离开时长静默丢失。
+        # 实测(2026-09-17): 21:29:11 离开, 最后一个时间表块 21:30:00 结束, away_end 被丢,
+        # 日报就写「离开座位 0 分钟」—— 人明明走了。现在单独报出来。
+        st.unfinished_away = max(0, away_starts - away_ends)
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"

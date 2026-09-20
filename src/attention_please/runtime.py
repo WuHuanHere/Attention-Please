@@ -258,15 +258,36 @@ class Runtime:
         with self._lock:
             if not self.paused:
                 return
-            duration = (at - self.pause_started).total_seconds() if self.pause_started \
-                else 0.0
+        duration = self._close_pause(at, reopen=False)
+        with self._lock:
             reason = self.pause_reason
             self.paused = False
-            self.pause_started = None
             self.pause_reason = ""
-        self.counters.pause_seconds += duration
         self._say(f"[{at:%H:%M:%S}] ▶ 恢复监控(暂停 {duration / 60:.1f} 分钟:{reason})")
-        self._log("pause_end", at=at, duration=duration, detail=reason)
+
+    def _close_pause(self, now: datetime, *, reopen: bool) -> float:
+        """把**进行中**的暂停结账(写一条 `pause_end`), 返回这段的秒数。
+
+        必须有人调用它, 否则那段时间和理由会一起消失 —— `day_stats` 和
+        `pause_reasons` **都只认 `pause_end`**。三条路径都要走这里:
+
+          - 用户点「恢复学习」 -> `resume()`;
+          - 程序退出           -> `shutdown()`;
+          - 生成日报时人还暂停着 -> `_daily_jobs()` 先结一段再重开一段(暂停继续计时)。
+
+        实测(2026-09-18): 21:00:06 暂停「今天学太累了」, 21:30 的日报写「暂停 46 分钟」
+        且理由里没有它 —— 那 30 分钟和那条必填理由都不存在, 而日报还在说
+        「见上面的…暂停记录」, 指向一条根本没写下来的记录。
+        """
+        with self._lock:
+            if not self.paused or self.pause_started is None:
+                return 0.0
+            duration = max(0.0, (now - self.pause_started).total_seconds())
+            reason = self.pause_reason
+            self.pause_started = now if reopen else None
+        self.counters.pause_seconds += duration
+        self._log("pause_end", at=now, duration=duration, detail=reason)
+        return duration
 
     def start_manual_session(self, minutes: int = 60) -> None:
         with self._lock:
@@ -496,8 +517,13 @@ class Runtime:
             # 拿一小时前(甚至午休前)的姿势当基准, 等于在猜。清掉, 恢复判定后重新学。
             if self.analyzer is not None:
                 self.analyzer.pose_head_estimator.reset()
-            self.sm.update(Observation(ts=mono, at=now), Policy(judging=False,
-                                                               enabled=enabled))
+            # **必须 dispatch**: suspend() 会把进行中的分集和"离开"收口, 返回
+            # EpisodeEnd / AwayChange(False)。丢掉返回值 = 那段分心和离开时长凭空消失,
+            # 还会在库里留下"有开头没结尾"的孤儿(实测 2026-09-17: 20:21 的分集孤儿、
+            # 21:29 的 away 孤儿 —— 那天日报写着"离开座位 0 分钟")。
+            # suspend() 不会产出 Nudge / EpisodeStart, 所以这里不发声、不弹窗、不截图。
+            self.dispatch(self.sm.update(Observation(ts=mono, at=now),
+                                         Policy(judging=False, enabled=enabled)))
             return
 
         self.idle_since = mono
@@ -745,6 +771,13 @@ class Runtime:
         if now.time() < self.cfg.report.report_time:
             return
         self._report_day = day
+        # 生成日报时如果人还暂停着, 先把**已经过去的那段**结账再重开一段 ——
+        # 否则 21:00 暂停、21:30 出日报, 那 30 分钟和理由都不在库里(实测踩到)。
+        # reopen=True 让暂停继续计时, 后面真的恢复时再结第二段。
+        try:
+            self._close_pause(now, reopen=True)
+        except Exception as exc:  # noqa: BLE001 - 结账失败不能挡住日报
+            self._say(f"暂停结账失败(忽略): {type(exc).__name__}: {exc}")
         try:
             path = write_report(self.cfg, self.store, day)
             self._say(f"[{now:%H:%M:%S}] 📄 今日日报已生成: {path}")
@@ -802,6 +835,13 @@ class Runtime:
 
     def shutdown(self) -> None:
         self._say("\n正在退出 ...")
+        # 退出前把**暂停**也结账: 否则"暂停中直接关掉托盘"会让整段暂停时长和理由消失
+        # (day_stats / pause_reasons 只认 pause_end)。实测 2026-09-18 21:00 那次就是。
+        try:
+            if self._close_pause(datetime.now(), reopen=False):
+                self.paused = False
+        except Exception as exc:  # noqa: BLE001 - 退出路径上绝不能再往外抛
+            self.log.exception("shutdown.pause", exc)
         # **退出前必须把进行中的分集收口**。否则这段分心既不计时长也不计次数, 而提醒
         # 已经响过了 —— 日报就会出现"提醒 2 次 / 分心 0 分钟"这种自相矛盾的行
         # (2026-09-20 实测: 10:49:31 那次分心刚开 16 秒, 程序就被关掉了)。

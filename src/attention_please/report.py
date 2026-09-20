@@ -88,6 +88,10 @@ def build_report(cfg: Config, store: Store, day: str,
     lines.append(f"| 分心 | {distract_txt} |")
     lines.append(f"| 暂停 | {_hm(st.pause_seconds)} |")
     away_txt = _hm(st.away_seconds) + (f"(提醒过 {st.away_nudges} 次)" if st.away_nudges else "")
+    if st.unfinished_away:
+        # 没有 away_end 的那段离开时长是未知的, 不编数字, 但**必须写出来** ——
+        # 否则这一行会写"离开 0 分钟", 而人明明走了(实测 2026-09-17)。
+        away_txt += f" + **{st.unfinished_away} 段没等到收尾**"
     lines.append(f"| 离开座位 | {away_txt} |")
     lines.append(f"| 看不清(脸不在画面) | {_hm(st.blind_seconds)} |")
     lines.append(f"| 提醒次数 | {st.nudges} |")
@@ -107,6 +111,11 @@ def build_report(cfg: Config, store: Store, day: str,
         lines.append(f"> ⚠️ 有 {st.unfinished_episodes} 段分心**没有收尾**: 程序在分心过程中"
                      f"被关掉/崩溃/蓝屏, 不知道它持续了多久。它**没有**计入上面的分心时长, "
                      f"所以那个数字只会少算、不会多算(也就是有效专注会略微偏高)。")
+        lines.append("")
+
+    if st.unfinished_away:
+        lines.append(f"> ⚠️ 有 {st.unfinished_away} 段「离开座位」**没有收尾**, 那段时间的"
+                     f"离开时长是未知的, **没有**计入上面的离开时长。")
         lines.append("")
 
     hours = store.busiest_distraction_hours(day)
