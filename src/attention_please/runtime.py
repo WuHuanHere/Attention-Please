@@ -145,6 +145,9 @@ class Runtime:
         self._flush_at = 0.0
         self._tick_count = 0
         self._face_count = 0
+        # 上一帧的单调时刻, 用来算"这一帧真实经过了多久"(写进 coverage_minute.seconds)。
+        # 不判定时清零 —— 否则待机/让出一小时后的第一帧会把那一小时算成监控时间。
+        self._last_tick_mono = 0.0
 
     # ------------------------------------------------------------------
     # 策略: 时间表 + 安静时段 + 启用信号
@@ -286,7 +289,8 @@ class Runtime:
             reason = self.pause_reason
             self.pause_started = now if reopen else None
         self.counters.pause_seconds += duration
-        self._log("pause_end", at=now, duration=duration, detail=reason)
+        self._log_span("pause_end", start_at=now - timedelta(seconds=duration),
+                       end_at=now, duration=duration, detail=reason)
         return duration
 
     def start_manual_session(self, minutes: int = 60) -> None:
@@ -443,6 +447,33 @@ class Runtime:
         self.store.event(kind, at=at, signal=signal, level=level, duration=duration,
                          evidence=evidence, block=block, detail=detail)
 
+    def _log_span(self, kind: str, *, start_at: datetime, end_at: datetime,
+                  duration: float, **fields) -> None:
+        """记一段**有始有终**的时间。跨午夜要按天拆开。
+
+        不拆的后果(2026-09-20 审查时发现, 用合成数据复现过): 一段 23:55–00:05 的分集
+        整段落进第二天, 于是
+          - 起始日留下一个**假的**"没等到收尾"(日报会谎报"程序在分心时被关掉/崩溃");
+          - 次日凭空多出 600 秒分心, 而它那天只监控了 600 秒 -> 有效专注被夹成 0。
+        拆开之后两边各自的账都自洽: 时长按比例分到两天, 而 monitored 本来就是按天算的。
+        """
+        if duration <= 0 or end_at.date() == start_at.date():
+            self._log(kind, at=end_at, duration=duration, **fields)
+            return
+        cursor, remaining = start_at, duration
+        while cursor.date() < end_at.date():
+            # 注意: 这里**不能** `from datetime import time` —— 那会把 `import time`
+            # 这个模块整个盖掉, 而 time.monotonic() 到处都是(实测: 一改就全线 AttributeError)。
+            boundary = datetime.combine(cursor.date() + timedelta(days=1),
+                                        datetime.min.time())
+            part = (boundary - cursor).total_seconds()
+            self._log(kind, at=boundary - timedelta(seconds=1),
+                      duration=min(part, remaining), **fields)
+            remaining -= part
+            cursor = boundary
+        if remaining > 0:
+            self._log(kind, at=end_at, duration=remaining, **fields)
+
     def _say(self, message: str) -> None:
         """控制台输出: 编码不兼容时降级, 绝不抛异常。
 
@@ -524,10 +555,12 @@ class Runtime:
             # suspend() 不会产出 Nudge / EpisodeStart, 所以这里不发声、不弹窗、不截图。
             self.dispatch(self.sm.update(Observation(ts=mono, at=now),
                                          Policy(judging=False, enabled=enabled)))
+            self._last_tick_mono = 0.0     # 恢复判定后重新开始量真实间隔
             return
 
         self.idle_since = mono
         if not self._ensure_camera():
+            self._last_tick_mono = 0.0
             return
 
         ok, frame = self.cap.read()
@@ -535,6 +568,7 @@ class Runtime:
             self.cap.release()
             self.cap = None
             self._log("camera_read_fail")
+            self._last_tick_mono = 0.0
             return
 
         ts_ms = int((mono - self.t0) * 1000)
@@ -543,8 +577,13 @@ class Runtime:
         self._tick_count += 1
         self._face_count += 1 if feats.face_present else 0
         self._face_pct_recent = (self._face_count / max(1, self._tick_count)) * 100.0
+        # 把**真实经过的秒数**一起记下来 —— "实际监控时长"要用它, 而不是
+        # "tick 数 ÷ 配置里的 tick_hz"(那样改一次 tick_hz 就会回溯性改写全天统计,
+        # 而且循环掉速时会多扣有效专注)。首帧没有上一帧, 用标称间隔兜底。
+        dt = mono - self._last_tick_mono if self._last_tick_mono else 1.0 / max(0.5, self.cfg.general.tick_hz)
+        self._last_tick_mono = mono
         self.store.coverage_tick(now, feats.pose_present, feats.face_present,
-                                 judging=True)
+                                 judging=True, dt=min(dt, 5.0))
 
         obs = Observation(
             ts=mono, at=now,
@@ -655,8 +694,10 @@ class Runtime:
                 self.counters.distract_seconds += act.duration
                 self._say(f"[{act.at:%H:%M:%S}] ⏹ 分心结束, 持续 {act.duration:.0f} 秒"
                       f"(最高 L{act.max_level})")
-                self._log("episode_end", signal=act.signal.value, level=act.max_level,
-                          duration=act.duration, evidence=act.evidence)
+                self._log_span("episode_end", signal=act.signal.value,
+                               level=act.max_level, evidence=act.evidence,
+                               start_at=act.at - timedelta(seconds=act.duration),
+                               end_at=act.at, duration=act.duration)
             elif isinstance(act, AwayChange):
                 if act.away:
                     self._say(f"[{act.at:%H:%M:%S}] 💤 离开座位(只记录, 不提醒)")
@@ -664,7 +705,9 @@ class Runtime:
                 else:
                     self.counters.away_seconds += act.duration
                     self._say(f"[{act.at:%H:%M:%S}] 👋 回到座位(离开 {act.duration / 60:.1f} 分钟)")
-                    self._log("away_end", duration=act.duration)
+                    self._log_span("away_end",
+                                   start_at=act.at - timedelta(seconds=act.duration),
+                                   end_at=act.at, duration=act.duration)
 
     def _capture(self, act: EpisodeStart, frame) -> None:
         """分心开始时存一张"屏幕+摄像头"拼接图(按 privacy 配置, 7 天自动删)。

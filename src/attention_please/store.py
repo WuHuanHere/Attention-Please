@@ -49,9 +49,45 @@ CREATE TABLE IF NOT EXISTS coverage_minute (
     pose_hits  INTEGER NOT NULL DEFAULT 0,
     face_hits  INTEGER NOT NULL DEFAULT 0,
     judging    INTEGER NOT NULL DEFAULT 0,
+    seconds    REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (day, minute)
 );
 """
+
+# 老库没有 seconds 列(2026-09-20 之前)。SQLite 的 ADD COLUMN 是幂等的补丁式迁移,
+# 不能只靠 CREATE TABLE IF NOT EXISTS —— 表已经存在时那句什么都不做。
+MIGRATIONS = (
+    ("coverage_minute", "seconds", "REAL NOT NULL DEFAULT 0"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, decl in MIGRATIONS:
+        try:
+            have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error:
+            continue
+        if column in have:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        except sqlite3.Error:
+            pass          # 加不上就退回旧口径(day_stats 里有兜底), 绝不让程序起不来
+
+
+def _subtract_spans(secs: float, start: float,
+                    spans: list[tuple[float, float]]) -> float:
+    """从区间 `[start, start+secs)` 里扣掉与 `spans` 重叠的部分, 返回剩下的秒数。
+
+    用途只有一个但很关键: **别让"离开"的时间同时算进"看不清"**。
+    """
+    end = start + secs
+    removed = 0.0
+    for s0, s1 in spans:
+        lo, hi = max(start, s0), min(end, s1)
+        if hi > lo:
+            removed += hi - lo
+    return max(0.0, secs - removed)
 
 
 @dataclass
@@ -112,6 +148,7 @@ class Store:
             except sqlite3.Error:
                 pass
             conn.executescript(SCHEMA)      # 幂等
+            _migrate(conn)                  # 老库补列(幂等)
             conn.commit()
             self._local.conn = conn
             with self._conn_lock:
@@ -172,19 +209,30 @@ class Store:
         self.conn.commit()
 
     def coverage_tick(self, at: datetime, pose_hit: bool, face_hit: bool,
-                      judging: bool) -> None:
-        """累加当前分钟的覆盖率。调用方按帧调用。"""
+                      judging: bool, dt: float = 0.0) -> None:
+        """累加当前分钟的覆盖率。调用方按帧调用。
+
+        `dt` = 距上一帧**真实**经过的秒数。有了它, "实际监控时长"就是实测值, 而不是
+        "tick 数 ÷ 配置里的 tick_hz" —— 后者有两个毛病(都是实测出来的):
+          1) 改一次 `tick_hz`(config.toml 明写可以手改, 60 秒热重载)会**回溯性**
+             改写全天统计: 5 -> 10 会让"实际监控"从 98 分钟变成 49 分钟;
+          2) 循环掉速时 monitored 缩水, 而 distract/away 是真实墙钟秒 -> 多扣有效专注。
+        `dt=0` 时退回旧口径(老调用方与老数据仍然能用)。
+        """
         day = at.date().isoformat()
         minute = at.strftime("%Y-%m-%dT%H:%M")
         self._write(
-            "INSERT INTO coverage_minute (day, minute, ticks, pose_hits, face_hits, judging)"
-            " VALUES (?,?,1,?,?,?)"
+            "INSERT INTO coverage_minute"
+            " (day, minute, ticks, pose_hits, face_hits, judging, seconds)"
+            " VALUES (?,?,1,?,?,?,?)"
             " ON CONFLICT(day, minute) DO UPDATE SET"
             "   ticks = ticks + 1,"
             "   pose_hits = pose_hits + excluded.pose_hits,"
             "   face_hits = face_hits + excluded.face_hits,"
-            "   judging = judging + excluded.judging",
-            (day, minute, 1 if pose_hit else 0, 1 if face_hit else 0, 1 if judging else 0))
+            "   judging = judging + excluded.judging,"
+            "   seconds = seconds + excluded.seconds",
+            (day, minute, 1 if pose_hit else 0, 1 if face_hit else 0,
+             1 if judging else 0, max(0.0, float(dt))))
 
     def flush(self) -> None:
         self.conn.commit()
@@ -253,29 +301,57 @@ class Store:
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"
-            " COALESCE(SUM(face_hits),0), MIN(minute), MAX(minute)"
+            " COALESCE(SUM(face_hits),0), MIN(minute), MAX(minute),"
+            " COALESCE(SUM(seconds),0)"
             " FROM coverage_minute WHERE day = ?", (day,))
-        ticks, pose_hits, face_hits, first_minute, last_minute = cur.fetchone()
-        # 实际监控时长 = 判定 tick 数 / 频率。日报的比值**必须**用它当分母:
-        # 用"计划时长"当分母, 会把"机器没开机/程序没跑"算成"你没专注"(2026-09-18 实测踩到)。
-        st.monitored_seconds = ticks / max(tick_hz, 0.1)
+        (ticks, pose_hits, face_hits, first_minute, last_minute,
+         total_seconds) = cur.fetchone()
+        # 实际监控时长。日报的比值**必须**用它当分母: 用"计划时长"当分母, 会把
+        # "机器没开机/程序没跑"算成"你没专注"(2026-09-18 实测踩到)。
+        # 优先用**真实经过的秒数**(seconds 列); 老数据那列是 0, 退回 tick 数 ÷ tick_hz。
+        # ⚠️ 旧口径的两个毛病: 改 tick_hz 会回溯性改写全天统计; 循环掉速时会多扣专注。
+        st.monitored_seconds = (total_seconds if total_seconds > 0
+                                else ticks / max(tick_hz, 0.1))
         st.first_monitored = (first_minute or "")[11:16]
         st.last_monitored = (last_minute or "")[11:16]
         if ticks:
             st.coverage = face_hits / ticks
             # 判定中但脸看不到的分钟 -> 记成"看不清"(不给专注时长, 也不当成分心)
+            away_spans = self._away_spans(day)
             cur = self.conn.execute(
-                "SELECT minute, ticks, face_hits, judging FROM coverage_minute"
+                "SELECT minute, ticks, face_hits, judging, seconds FROM coverage_minute"
                 " WHERE day = ?", (day,))
-            for _minute, m_ticks, m_face, m_judging in cur.fetchall():
+            for _minute, m_ticks, m_face, m_judging, m_seconds in cur.fetchall():
                 if not m_ticks or not m_judging:
                     continue
                 if m_face / m_ticks < 0.5:
-                    st.blind_seconds += m_judging / max(tick_hz, 0.1)
+                    secs = (m_seconds if m_seconds > 0
+                            else m_judging / max(tick_hz, 0.1))
+                    # **离开的时间不许同时算进"看不清"**: 人不在座位上时人脸当然是 0%,
+                    # 那些分钟会整段落进 blind, 而 away 又扣一次 -> 有效专注被扣两遍。
+                    # 实测 2026-09-18: 离开窗口 15:09:59-15:20:49 全落在 blind 分钟里,
+                    # 日报的"有效专注 5 小时 22 分"因此少算 10.8 分钟(应为 5 小时 32 分)。
+                    st.blind_seconds += _subtract_spans(
+                        secs, datetime.fromisoformat(_minute).timestamp(), away_spans)
 
         st.focus_seconds = max(0.0, st.monitored_seconds - st.distract_seconds
                                - st.blind_seconds - st.away_seconds)
         return st
+
+    def _away_spans(self, day: str) -> list[tuple[float, float]]:
+        """这一天的"离开"时间区间(epoch 秒), 用来把它从"看不清"里扣掉。
+
+        ⚠️ 区间起点必须由 **`away_end` 的 ts 减去 duration** 算出来, 不能用
+        `away_start` 的 ts —— 两者差着整整 `away_seconds`(默认 90 秒): `away_start`
+        是在"离开够久、决定记一笔"的那一刻写的, 而 duration 是从 Pose 刚丢失
+        (`away_since`)算起的。实测 2026-09-18: away_start 写在 15:11:30, 而
+        duration=649.7s 对应的区间是 15:10:00–15:20:49 —— 用 away_start 当起点会
+        少扣 90 秒, 那 90 秒仍然被"看不清"和"离开"各扣一次。
+        """
+        cur = self.conn.execute(
+            "SELECT ts, COALESCE(duration, 0) FROM event"
+            " WHERE day = ? AND kind = 'away_end'", (day,))
+        return [(float(ts) - float(dur), float(ts)) for ts, dur in cur.fetchall()]
 
     def busiest_distraction_hours(self, day: str, top: int = 3) -> list[tuple[int, float]]:
         """最常分心的时段。
