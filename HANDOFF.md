@@ -631,7 +631,8 @@ pitch**,但"头没低"**不等于**"头朝前" —— 看手机时头是抬着�
 
 ## 11. 给下一个 agent 的工作约定
 
-1. **先跑测试再改代码**(207 项,2 秒,不需要摄像头)。改完再跑一次。
+1. **先跑测试再改代码**(372 项,约 9 秒,不需要摄像头)。改完再跑一次。
+   UI 那 10 项默认跳过,要 `$env:AP_UI_TESTS=1` 才会真弹窗。
 2. **行为类 bug 先复现再修**:本会话最有价值的三个 bug(饿死/冷却/误报)都是靠
    **"用数据库里的真实时间戳回放状态机"** 定位的,而不是靠读代码猜。
    新 bug 优先写一个 `probe_out/replay_*.py` 复现。
@@ -646,6 +647,19 @@ pitch**,但"头没低"**不等于**"头朝前" —— 看手机时头是抬着�
 9. **不要改这些已确认的口径**:误报最烦 > 漏报;低头=纸笔模式不判窗口;看不到脸不猜;
    提示音不要语音;暂停必须写理由;离座 15 分钟提醒一次;安静时段只弹窗。
 10. **本机特有环境的绕法**(pip/PowerShell/文件替换)已经写在 §5,**直接照做,不要重新探索**。
+11. **改完要同步到两个远端仓库**(用户 2026-09-20 要求)。已经配好: `origin` 的 fetch 指向
+    GitHub, 而 **push 有两个 URL**(GitHub + Gitee), 所以一条 `git push` 就同时推两边:
+
+    ```
+    origin  https://github.com/WuHuanHere/Attention-Please.git   (fetch + push)
+    origin  https://gitee.com/WuHuanHere/attention-please.git    (push)
+    ```
+
+    ⚠️ **两个仓库都是公开的**。推之前务必确认没有个人数据: `data/`、`captures/`、
+    `calibration.json`、`probe_out/` 已在 `.gitignore` 里; 文档里**不要写 Windows 用户名**
+    (用 `%LOCALAPPDATA%` / `%APPDATA%` 代替)。
+    ⚠️ `git push` 需要 Git Credential Manager, 而**沙箱会拦住它**(msys `sh.exe` 报
+    "couldn't create signal pipe, Win32 error 5") —— 需要用 `danger-full-access` 跑一次。
 
 ---
 
