@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import types
@@ -153,6 +154,55 @@ class TestTray(unittest.TestCase):
         self.tray.icon = None
         self.tray._quit()
         self.assertFalse(self.rt.running)
+
+
+class TestTrayDoesNotLieAboutBookkeeping(unittest.TestCase):
+    """记账失败时托盘**不许**报成功。
+
+    实测 2026-09-20 13:37:54: 让出摄像头时写库撞上 `database is locked`, 异常被 pystray
+    吞掉, 而通知照样说"会记进日报" —— 用户会以为记上了, 日报里却没有这笔。
+    状态(内存里)其实已经改了, 所以文案必须把"让出成功了"和"记账失败了"分开说。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        cfg = Config.from_dict(RAW, path=self.root / "config.toml")
+        self.rt = Runtime(cfg, Calibration())
+        self.rt.ui = types.SimpleNamespace(show=lambda req: None,
+                                           ask_reason=lambda *a: None,
+                                           drain=lambda: [])
+        self.tray = Tray(self.rt, cfg.report_dir)
+        self.notes: list[str] = []
+        self.tray._notify = lambda message, title="attention_please": self.notes.append(message)
+
+    def tearDown(self):
+        self.rt.close()
+        self.tmp.cleanup()
+
+    def test_yield_bookkeeping_failure_is_visible(self):
+        def boom(_mins):
+            raise sqlite3.OperationalError("database is locked")
+
+        self.rt.yield_camera = boom
+        self.tray._yield()
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn("记账失败", self.notes[0])
+        self.assertNotIn("会记进日报", self.notes[0],
+                         "记账失败了还说'会记进日报' —— 这是在骗人")
+
+    def test_reclaim_bookkeeping_failure_is_visible(self):
+        def boom():
+            raise sqlite3.OperationalError("database is locked")
+
+        self.rt.reclaim_camera = boom
+        self.tray._reclaim()
+        self.assertIn("记账失败", self.notes[0])
+
+    def test_normal_yield_still_says_success(self):
+        self.tray._yield()
+        self.assertIn("会记进日报", self.notes[0])
+        self.assertNotIn("记账失败", self.notes[0])
 
 
 if __name__ == "__main__":

@@ -50,6 +50,13 @@ CAMERA_RETRY_MAX_SECONDS = 300
 CAMERA_RELEASE_AFTER = 120
 CONFIG_RELOAD_SECONDS = 60
 SUMMARY_EVERY_SECONDS = 300
+# 落盘间隔。**不是随手定的数字**: 每帧的 coverage_tick 会隐式开启一个写事务, 在 commit
+# 之前整个库的写锁都在监控线程手里。原来写的是 30 秒 —— 托盘线程(暂停/让出/日报)的
+# 写操作会在 10 秒 busy timeout 之后失败, 而失败的写会把那个连接永久留在事务里, 于是
+# 托盘读到的永远是失败那一刻的快照(2026-09-20 实测: 日报卡在 17 分钟不动)。
+# 2 秒既远小于 busy timeout(托盘写基本不会撞锁), 又比原来多 15 倍落盘频率:
+# 蓝屏最多丢 2 秒, 而不是 30 秒。
+FLUSH_EVERY_SECONDS = 2.0
 
 
 @dataclass
@@ -524,9 +531,10 @@ class Runtime:
         )
         self.dispatch(self.sm.update(obs, policy), frame)
 
-        # 每 30 秒落盘一次: 这台机器 4 天蓝屏两次(0x124 硬件错误), 不能把 5 分钟的数据
-        # 全押在内存里 —— 一次蓝屏就等于那 5 分钟凭空消失。
-        if mono - self._flush_at > 30:
+        # 每 FLUSH_EVERY_SECONDS 落盘一次: 这台机器 4 天蓝屏两次(0x124 硬件错误),
+        # 不能把数据全押在内存里 —— 一次蓝屏就等于那段时间凭空消失。
+        # 间隔不能拉长: 它同时也是"写锁被监控线程攥住"的时长, 见 FLUSH_EVERY_SECONDS。
+        if mono - self._flush_at > FLUSH_EVERY_SECONDS:
             self._flush_at = mono
             self.store.flush()
 

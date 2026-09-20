@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
 
+# 撞上写锁时等多久才放弃。**这个数字和 runtime.FLUSH_EVERY_SECONDS 是一对**:
+# 监控线程攥着写锁的时长必须远小于它, 否则托盘线程的写必然失败。
+# tests/test_store_lock.py 里有守这条关系的测试。
+BUSY_TIMEOUT_SECONDS = 10
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS event (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +96,8 @@ class Store:
         if conn is None:
             # check_same_thread=False 是**为了能在 shutdown 时由主线程统一关闭**
             # 各个工作线程的连接; 每个线程仍然只用自己的那一份(thread-local), 不存在并发共用。
-            conn = sqlite3.connect(str(self.path), timeout=10, check_same_thread=False)
+            conn = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT_SECONDS,
+                                   check_same_thread=False)
             try:
                 conn.execute("PRAGMA journal_mode=WAL")   # 读写不互相阻塞(托盘每 2 秒读一次)
             except sqlite3.Error:
@@ -103,13 +109,53 @@ class Store:
                 self._conns.append(conn)
         return conn
 
+    # ---- 读写的两道安全阀 ----
+    #
+    # 这两个方法是 2026-09-20 那个"日报卡在 17 分钟"的 bug 的直接产物, 别删:
+    #
+    #   pysqlite 在执行 DML 之前会**隐式 BEGIN**。如果那条语句本身失败(最常见的是
+    #   "database is locked"), 事务不会自动结束 —— 它留在连接里。此后这个连接:
+    #     * 所有 SELECT 都钉在失败那一刻的快照上(WAL 读事务的快照语义),
+    #     * 写操作也不再重新 BEGIN, 于是一直撞在同一个锁上。
+    #   实测时间线: 13:37:54 托盘线程写事件撞锁 -> 13:37:56 悬停提示轮询读了第一次,
+    #   快照就此冻结 -> 之后菜单里的日报**永远**显示 13:37 的 17 分钟, 而监控线程
+    #   自己的进度早就是 0.97 h。连接不是坏了, 是"半死", 而且没有任何报错。
+    #
+    # 所以: 写失败必须回滚(把连接放回干净状态), 读之前必须了结挂着的写事务
+    # (保证读到的是最新数据, 而不是某个旧快照)。
+    def _rollback_quietly(self) -> None:
+        try:
+            self.conn.rollback()
+        except Exception:  # noqa: BLE001 - 回滚失败时已无路可走, 不能让清理动作再抛
+            pass
+
+    def _write(self, sql: str, params: tuple) -> None:
+        try:
+            self.conn.execute(sql, params)
+        except Exception:
+            self._rollback_quietly()
+            raise
+
+    def _fresh_read(self) -> None:
+        """读之前把本连接上挂着的写事务落定。
+
+        开事务的永远是写路径, 所以这里 commit 只会把**已经写好的东西**落盘, 不会丢数据;
+        代价是可能把一个还在攒的批次提前提交 —— 对这套系统来说"读到最新"远比
+        "攒批次"重要。写完还没 commit 的 tick 也不会丢, 它们只是提前落盘了。
+        """
+        try:
+            if self.conn.in_transaction:
+                self.conn.commit()
+        except sqlite3.Error:
+            self._rollback_quietly()
+
     # ---- 写入 ----
     def event(self, kind: str, *, at: datetime | None = None, signal: str | None = None,
               level: int | None = None, duration: float | None = None,
               evidence: str | None = None, block: str | None = None,
               detail: str | None = None) -> None:
         at = at or datetime.now()
-        self.conn.execute(
+        self._write(
             "INSERT INTO event (ts, at, day, kind, signal, level, duration, evidence, block, detail)"
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (at.timestamp(), at.isoformat(timespec="seconds"), at.date().isoformat(),
@@ -121,7 +167,7 @@ class Store:
         """累加当前分钟的覆盖率。调用方按帧调用。"""
         day = at.date().isoformat()
         minute = at.strftime("%Y-%m-%dT%H:%M")
-        self.conn.execute(
+        self._write(
             "INSERT INTO coverage_minute (day, minute, ticks, pose_hits, face_hits, judging)"
             " VALUES (?,?,1,?,?,?)"
             " ON CONFLICT(day, minute) DO UPDATE SET"
@@ -137,6 +183,7 @@ class Store:
     # ---- 查询(M5 日报用) ----
     def day_stats(self, day: str, planned_seconds: float = 0.0,
                   tick_hz: float = 5.0) -> DayStats:
+        self._fresh_read()
         st = DayStats(day=day, planned_seconds=planned_seconds)
         cur = self.conn.execute(
             "SELECT kind, signal, level, duration FROM event WHERE day = ?", (day,))
@@ -204,6 +251,7 @@ class Store:
         away 的时间已经在 away_seconds 里, pose 是"看不到脸时的弱证据记录"。
         不排除的话"最常分心的时段"会把离开座位和低头写题算进去(实测口径 bug)。
         """
+        self._fresh_read()
         cur = self.conn.execute(
             "SELECT at, duration FROM event WHERE day = ? AND kind = 'episode_end'"
             " AND (signal IS NULL OR signal NOT IN ('away', 'pose'))", (day,))
@@ -214,6 +262,7 @@ class Store:
         return sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)[:top]
 
     def top_titles_before(self, day: str, top: int = 5) -> list[tuple[str, int]]:
+        self._fresh_read()
         cur = self.conn.execute(
             "SELECT detail, COUNT(*) FROM event WHERE day = ? AND kind = 'nudge'"
             " AND detail IS NOT NULL GROUP BY detail ORDER BY COUNT(*) DESC LIMIT ?",
@@ -222,6 +271,7 @@ class Store:
 
     def pause_reasons(self, day: str) -> list[tuple[str, float]]:
         """暂停理由与时长。暂停是"有代价的" —— 代价就是理由会被记进日报。"""
+        self._fresh_read()
         cur = self.conn.execute(
             "SELECT detail, SUM(duration) FROM event WHERE day = ? AND kind = 'pause_end'"
             " GROUP BY detail ORDER BY SUM(duration) DESC", (day,))

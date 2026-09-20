@@ -84,13 +84,26 @@ class Tray:
         给"关键词匹配不到"的软件兜底 —— 你打开别的软件发现拿不到摄像头时, 点这个。
         """
         mins = self.rt.cfg.camera_yield.manual_minutes
-        self.rt.yield_camera(mins)
-        self._notify(f"已让出摄像头 {mins} 分钟(判定暂停, 会记进日报)")
+        try:
+            self.rt.yield_camera(mins)
+        except Exception as exc:  # noqa: BLE001
+            # 让出**本身**多半已经生效(状态在内存里), 但记账失败了。
+            # 这里绝不能吞: 吞掉就变成"日报里没这笔, 而你以为记上了" ——
+            # 实测 2026-09-20 托盘线程写库撞上 database is locked, 通知照样报成功。
+            self._notify(f"已让出摄像头, 但记账失败({type(exc).__name__}): "
+                         f"日报里可能少这段时间")
+        else:
+            self._notify(f"已让出摄像头 {mins} 分钟(判定暂停, 会记进日报)")
         self._refresh_icon()
 
     def _reclaim(self) -> None:
-        self.rt.reclaim_camera()
-        self._notify("已收回摄像头, 恢复判定")
+        try:
+            self.rt.reclaim_camera()
+        except Exception as exc:  # noqa: BLE001
+            self._notify(f"已收回摄像头, 但记账失败({type(exc).__name__}): "
+                         f"日报里可能少这段时间")
+        else:
+            self._notify("已收回摄像头, 恢复判定")
         self._refresh_icon()
 
     def _open_report(self) -> None:
