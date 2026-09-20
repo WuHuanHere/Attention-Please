@@ -134,6 +134,21 @@ class TestMonitoredUsesRealSeconds(unittest.TestCase):
         st = self.store.day_stats(DAY, tick_hz=5.0)
         self.assertAlmostEqual(st.monitored_seconds, 4.0, delta=0.01)
 
+    def test_mixed_old_and_new_rows_mid_day_restart(self):
+        """**中午重启**会让当天变成混合状态: 上午的分钟只有 tick 数, 下午的有秒数。
+
+        整体判断(SUM(seconds) > 0 ? 用秒数 : 用 tick)会把上午整段算成 0 ——
+        当天监控时长直接腰斩。必须逐分钟判断。
+        """
+        for i in range(10):                     # 老代码写的: 没有 seconds
+            self.store.coverage_tick(at(9, 0, i), pose_hit=True, face_hit=True,
+                                     judging=True)
+        for i in range(10):                     # 重启后新代码写的: 每帧 2 秒
+            self.store.coverage_tick(at(14, 0, i), pose_hit=True, face_hit=True,
+                                     judging=True, dt=2.0)
+        st = self.store.day_stats(DAY, tick_hz=5.0)
+        self.assertAlmostEqual(st.monitored_seconds, 10 * 0.2 + 10 * 2.0, delta=0.1)
+
 
 class TestCrossMidnightSpans(unittest.TestCase):
     """M7 —— 跨午夜要按天拆开, 否则一边谎报"崩溃"、一边把专注夹成 0。"""

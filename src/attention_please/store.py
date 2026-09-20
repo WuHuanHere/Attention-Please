@@ -338,38 +338,44 @@ class Store:
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"
-            " COALESCE(SUM(face_hits),0), MIN(minute), MAX(minute),"
-            " COALESCE(SUM(seconds),0)"
+            " COALESCE(SUM(face_hits),0), MIN(minute), MAX(minute)"
             " FROM coverage_minute WHERE day = ?", (day,))
-        (ticks, pose_hits, face_hits, first_minute, last_minute,
-         total_seconds) = cur.fetchone()
-        # 实际监控时长。日报的比值**必须**用它当分母: 用"计划时长"当分母, 会把
-        # "机器没开机/程序没跑"算成"你没专注"(2026-09-18 实测踩到)。
-        # 优先用**真实经过的秒数**(seconds 列); 老数据那列是 0, 退回 tick 数 ÷ tick_hz。
-        # ⚠️ 旧口径的两个毛病: 改 tick_hz 会回溯性改写全天统计; 循环掉速时会多扣专注。
-        st.monitored_seconds = (total_seconds if total_seconds > 0
-                                else ticks / max(tick_hz, 0.1))
+        ticks, pose_hits, face_hits, first_minute, last_minute = cur.fetchone()
         st.first_monitored = (first_minute or "")[11:16]
         st.last_monitored = (last_minute or "")[11:16]
         if ticks:
             st.coverage = face_hits / ticks
+
+        # 实际监控时长。日报的比值**必须**用它当分母: 用"计划时长"当分母, 会把
+        # "机器没开机/程序没跑"算成"你没专注"(2026-09-18 实测踩到)。
+        #
+        # 优先用 `seconds` 列(**真实经过的秒数**); 老数据/老代码写的那列是 0, 退回
+        # "tick 数 ÷ tick_hz"。旧口径的两个毛病: 改 tick_hz 会回溯性改写全天统计;
+        # 循环掉速时会多扣有效专注。
+        #
+        # ⚠️ **必须逐分钟判断, 不能整体判断** —— 中午重启一次, 当天就变成"上午的分钟
+        # 只有 tick 数、下午的分钟有秒数"的混合状态; 整体看 SUM(seconds)>0 就会把
+        # 上午全部算成 0, 当天监控时长直接腰斩。
+        fallback = 1.0 / max(tick_hz, 0.1)
+        away_spans = self._away_spans(day)
+        monitored = 0.0
+        cur = self.conn.execute(
+            "SELECT minute, ticks, face_hits, judging, seconds FROM coverage_minute"
+            " WHERE day = ?", (day,))
+        for _minute, m_ticks, m_face, m_judging, m_seconds in cur.fetchall():
+            if not m_ticks:
+                continue
+            monitored += m_seconds if m_seconds > 0 else m_ticks * fallback
             # 判定中但脸看不到的分钟 -> 记成"看不清"(不给专注时长, 也不当成分心)
-            away_spans = self._away_spans(day)
-            cur = self.conn.execute(
-                "SELECT minute, ticks, face_hits, judging, seconds FROM coverage_minute"
-                " WHERE day = ?", (day,))
-            for _minute, m_ticks, m_face, m_judging, m_seconds in cur.fetchall():
-                if not m_ticks or not m_judging:
-                    continue
-                if m_face / m_ticks < 0.5:
-                    secs = (m_seconds if m_seconds > 0
-                            else m_judging / max(tick_hz, 0.1))
-                    # **离开的时间不许同时算进"看不清"**: 人不在座位上时人脸当然是 0%,
-                    # 那些分钟会整段落进 blind, 而 away 又扣一次 -> 有效专注被扣两遍。
-                    # 实测 2026-09-18: 离开窗口 15:09:59-15:20:49 全落在 blind 分钟里,
-                    # 日报的"有效专注 5 小时 22 分"因此少算 10.8 分钟(应为 5 小时 32 分)。
-                    st.blind_seconds += _subtract_spans(
-                        secs, datetime.fromisoformat(_minute).timestamp(), away_spans)
+            if m_judging and m_face / m_ticks < 0.5:
+                secs = m_seconds if m_seconds > 0 else m_judging * fallback
+                # **离开的时间不许同时算进"看不清"**: 人不在座位上时人脸当然是 0%,
+                # 那些分钟会整段落进 blind, 而 away 又扣一次 -> 有效专注被扣两遍。
+                # 实测 2026-09-18: 离开窗口 15:09:59-15:20:49 全落在 blind 分钟里,
+                # 日报的"有效专注 5 小时 22 分"因此少算 10.8 分钟(应为 5 小时 32 分)。
+                st.blind_seconds += _subtract_spans(
+                    secs, datetime.fromisoformat(_minute).timestamp(), away_spans)
+        st.monitored_seconds = monitored
 
         st.focus_seconds = max(0.0, st.monitored_seconds - st.distract_seconds
                                - st.blind_seconds - st.away_seconds)

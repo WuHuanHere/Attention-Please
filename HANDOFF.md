@@ -96,8 +96,8 @@ Get-ChildItem src\attention_please\*.py | Sort-Object LastWriteTime -Descending 
 
 ### 代码规模
 
-54 个 .py 文件、9014 行(源码 3946 行 / 19 个,测试 3631 行 / 27 个,脚本 1437 行 / 10 个;
-另有 `probe_out/` 31 个文件 2174 行,不进版本库)。**326 项单测**(7 项需 `AP_UI_TESTS=1`)。
+54 个 .py 文件、10145 行(源码 4322 行 / 19 个,测试 4386 行 / 32 个,脚本 1437 行 / 10 个;
+另有 `probe_out/` 62 个文件 3570 行,不进版本库)。**371 项单测**(10 项需 `AP_UI_TESTS=1`)。
 
 ### 数据快照(截至 2026-09-18 18:15)
 
@@ -287,6 +287,19 @@ scripts/
     落盘间隔 30 秒 → 2 秒(`runtime.FLUSH_EVERY_SECONDS`, 必须远小于
     `store.BUSY_TIMEOUT_SECONDS`)。`tests/test_store_lock.py` 守这条, 并做过变异测试。
 
+14c. **`from datetime import time` 会把 `import time` 这个模块整个盖掉**。runtime 里到处是
+    `time.monotonic()`, 加一行 `from datetime import time` 之后全线 `AttributeError`
+    (单测当场抓住)。要拿"当天零点"用 `datetime.min.time()`。
+14d. **`coverage_minute.seconds` 这类新列必须逐行判断可用性, 不能整体判断**。中午重启一次,
+    当天就变成"上午的分钟只有 tick 数、下午的分钟有秒数"的混合状态; 整体写
+    `SUM(seconds) > 0 ? 用秒数 : 用 tick` 会把上午全算成 0 —— 当天监控时长直接腰斩。
+14e. **时间段事件(episode_end / away_end / pause_end)跨午夜必须按天拆开**(`_log_span`)。
+    不拆的后果是双向的: 起始日留下一个**假的**"没等到收尾"(日报会谎报"程序崩溃"),
+    次日凭空多出时长把有效专注夹成 0。
+14f. **`away_start` 的 ts 不是离开区间的起点** —— 它是在"离开够久、决定记一笔"那一刻写的,
+    比真实起点晚整整 `away_seconds`(默认 90 秒)。区间的权威定义是
+    `away_end.ts - duration`, 拿 `away_start.ts` 去减会少扣 90 秒。
+
 ### 判定逻辑类(最贵的三条)
 
 15. **抑制类逻辑只能抑制"提醒",绝不能抑制"记账"**。曾经的写法是
@@ -362,6 +375,21 @@ scripts/
 | 18 | 让出摄像头时日志写了个假原因 | `_release_camera()` 的释放原因硬编码 | `test_release_log_does_not_lie_about_the_reason` |
 | 19 | **日报/悬停提示卡在 17 分钟不动**(用户报) | 写失败把 sqlite 连接留在事务里 → 读永远停在旧快照 | `test_store_lock`(7 项, 已变异验证) |
 | 20 | **分心时被杀掉, 那段分心凭空消失**(用户报 bug 顺带发现) | `shutdown()` 没收口进行中的分集 → 日报"提醒 2 次 / 分心 0 分钟" | `test_runtime_contract.TestShutdownClosesOpenEpisodes`(3 项)、`test_store.TestUnfinishedEpisodes`(5 项) |
+| 21 | **分心/离开在"停止判定"那一刻静默消失** | `_tick` 非判定分支丢掉了 `sm.update()` 的返回值(suspend 的收口动作没 dispatch) | `test_suspend_accounting`(7 项, 已变异验证) |
+| 22 | 进行中/被打断的暂停整段消失, 理由也没了 | `shutdown()` 和生成日报时都不写 `pause_end`, 而统计只认它 | `test_suspend_accounting` |
+| 23 | `_resume` 记账失败时用户零提示 | 它是唯一没护栏的记账动作 | `test_suspend_accounting` |
+| 24 | **「离开」被从有效专注里扣了两次** | `blind_seconds` 不排除 away, 而 `focus = monitored - distract - blind - away` | `test_time_accounting`(10 项, 已变异验证) |
+| 25 | 改 `tick_hz` 会**回溯性改写**全天统计 | `monitored_seconds` 用标称 tick_hz 折算, 不是实测秒数 | `test_time_accounting` |
+| 26 | 跨午夜: 时长记到次日 + 起始日假报"程序崩溃" | 事件按 `at.date()` 分日, 时间段不拆 | `test_time_accounting` |
+| 27 | 背单词时段用手机被当成摸鱼扣专注 | `episode_end` 不落 `record_only` | `test_accounting_flags`(11 项, 已变异验证) |
+| 28 | 点了「判定错了」照样扣那段的分心时长 | `report_wrong` 只设静默, 没真的结束分集 | `test_accounting_flags` |
+| 29 | UI 报错被记成 `alert_dismissed`(像"用户点了我回来了") | `_drain_ui` 的 else 分支吞掉一切未知类型 | `test_accounting_flags` |
+| 30 | 清空截图漏掉删不掉的文件却报"已清空" | `clear_all` 只数成功的, `except OSError: continue` | `test_accounting_flags` |
+| 31 | 白名单通用词让黑名单站点"隐身"且不留痕 | 白名单优先(刻意) × 通用名词 | `test_shadow_and_disable`(8 项) |
+| 32 | 热重载关掉信号 → 分集收不了口, 时长拉到块结束 | 未启用的信号被 `continue` 跳过, 没人收口 | `test_shadow_and_disable` |
+| 33 | Tk 起不来时提醒全哑, 托盘兜底走不到 | `tk.Tk()` 在 try 之外 + `show_report` 从不抛异常 | `test_ui_lifecycle`(3 项, 需 `AP_UI_TESTS=1`) |
+| 34 | 暂停框被顶掉/点 X 时静默取消 | 只有 算了/Esc 发 `reason_cancelled` | `test_ui_lifecycle` |
+| 35 | 被压掉的提醒声不留痕 / 分辨率不校验 / `start==end`=24 小时 / `GetTickCount` 有符号 / 死代码 | 见 PROGRESS 七之十七 | `test_low_severity`(6 项) |
 
 ---
 
@@ -574,6 +602,14 @@ pitch**,但"头没低"**不等于**"头朝前" —— 看手机时头是抬着�
   **但绝不编时长** —— 不知道就是不知道, 宁可缺不可假。
 - ⚠️ **`test_store_lock.py` 修的是"连接被写失败污染"**,而**已经跑着的实例里那个连接是回不来的** ——
   必须重启托盘才会恢复(监控线程本身一直是好的, 数据没丢)。
+- ✅ **全面体检已完成(2026-09-20)**: 21 个隐性 bug 全部修完并做了变异测试,
+  详见 PROGRESS「七之十七」和 §6 第 21–35 条。**下面两条是留给你拍板的产品决策**:
+  - **白名单优先级**(M5): 现在"白名单优先"会让通用词(数学/英语/考研/真题…)盖住
+    黑名单站点(知乎/微博/小红书/哔哩哔哩)。**判定没改**, 只是现在会记一条
+    `title_shadowed` 并在日报里披露。要不要倒过来(黑名单站点优先)由你定 ——
+    改了会直接影响误报率。
+  - **`tick_hz` 要不要提到 10**: 零下载、一行配置, 但收益接近于零(信号门槛是
+    10-15 秒连续 + 5 秒迟滞)。现在改它**不会**再改写历史统计了(见 §6 第 25 条)。
 - 可选:周报、打包 exe、多显示器支持、把"离开提醒通道"做成独立配置(现在跟随安静时段)。
 
 ---
