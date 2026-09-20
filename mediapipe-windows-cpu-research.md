@@ -1,6 +1,6 @@
 # MediaPipe / 摄像头实时监测 —— Windows 笔记本 CPU 事实清单
 
-**目标环境（用户给定）**：Windows 笔记本，Python 3.11.4（`C:\Users\Wu Fan\AppData\Local\Programs\Python\Python311`），将新建 venv，无独立显卡（CPU 推理），内置摄像头做实时监测。
+**目标环境（用户给定）**：Windows 笔记本，Python 3.11.4（`%LOCALAPPDATA%\Programs\Python\Python311`），将新建 venv，无独立显卡（CPU 推理），内置摄像头做实时监测。
 
 **取证方式与预算说明（先声明）**
 - 网页搜索：2 次调用（共 4 条 query）。搜索工具本次只返回"来源 URL 列表"，**不返回正文摘要**，因此搜索本身无法直接佐证具体数字。

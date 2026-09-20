@@ -120,7 +120,7 @@ cd 'E:\Code\attention_please'
 ## 七、下一步(等你发话)
 
 1. ~~决定是否安装开机自启~~ → **已安装**(2026-09-17):
-   `C:\Users\Wu Fan\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\attention_please.lnk`
+   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\attention_please.lnk`
    → `pythonw.exe scripts\run_tray.py`,**下次登录自动启动**。
    不想用了就 `python scripts\autostart.py uninstall`,或者直接把那个快捷方式删掉。
 2. ~~试跑满意后打开 phone 信号~~ → **已于 2026-09-18 12:48 开启**(热重载,无需重启)。
@@ -899,9 +899,19 @@ IO/UI 层(ui/notifier/foreground/input_activity/opener/tray)和配置/时间表�
 | L8 | 同一 tick 里两条提醒时, 第二声被 `min_gap` 压掉且**不留任何痕迹** | 两次 buzz 只响 1 次 |
 | L9 | 死代码: `runtime.Counters`(写 5 处读 0 处, 且把 away/pose 算进 `episodes`)、`baseline.deadband()`(比"低头"的位移还大, 判不出低头) | 已删 |
 
+### 用户拍板的两个决策(2026-09-20)
+
+1. **白名单优先级 = 白名单赢。** 原话:「考研数学基础班 - 知乎 应该归为专注, 因为这是我
+   在利用平台查找相关考研资料, 还有类似的我会在 b 站上看题目解析, 应该是白名单的优先级
+   高于黑名单」。所以 M5 **不是 bug, 是设计如此** —— 判定一行没改。
+   但把措辞从"⚠️ 可能漏判, 建议删白名单通用词"改成了中性披露
+   (`title_shadowed` 保留为诊断数据: 这个数一天几十次才说明黑名单该调了),
+   并加了 `test_whitelist_beats_blacklist_is_locked_in` 把这条决定钉死。
+2. **`tick_hz` 保持 5**, 不提到 10。
+
 ### 验证
 
-- **371 项单测通过**(带 `AP_UI_TESTS=1` 也全过, 10 项需要真实窗口)。
+- **372 项单测通过**(带 `AP_UI_TESTS=1` 也全过, 10 项需要真实窗口)。
 - 每一簇都做了**变异测试**: 把修复点逐个改回去, 确认正好是对应的测试失败
   (簇一 2 项 / 簇二 2+2+2 项 / 簇三 1+2+1+2 项)。
 - 真实库重算: 9/18 的「有效专注」从 **5 小时 22 分** 修正为 **5 小时 32 分**;

@@ -83,15 +83,27 @@ class TestWhitelistShadowingIsVisible(unittest.TestCase):
         rt.close()
         tmp.cleanup()
 
-    def test_report_discloses_it(self):
+    def test_report_discloses_it_neutrally(self):
+        """**用户 2026-09-20 已确认"白名单优先"是设计如此**, 所以日报里这句必须是
+        中性披露, 不能写成"警告/可能漏判/建议删词"。"""
         tmp = tempfile.TemporaryDirectory()
         rt = make_runtime(pathlib.Path(tmp.name) / "rt")
         rt._note_shadowed_title("考研数学真题解析 - 微博")
         text = build_report(rt.cfg, rt.store, DAY)
         self.assertIn("同时命中白/黑名单", text)
-        self.assertIn("知乎", text)          # 例子
+        self.assertIn("设计如此", text)
+        self.assertNotIn("可能漏判", text)
+        self.assertNotIn("⚠️ 有 1 次窗口标题", text)
         rt.close()
         tmp.cleanup()
+
+    def test_whitelist_beats_blacklist_is_locked_in(self):
+        """把"白名单优先"这条已确认的决定钉死 —— 别哪天被"优化"成站点优先。"""
+        for title in ("考研数学基础班 - 知乎", "【考研政治】徐涛强化班 - 哔哩哔哩",
+                      "电路真题讲解 - 微博"):
+            m = classify(title, WHITE, BLACK)
+            self.assertIs(m.verdict, TitleVerdict.FOCUS,
+                          f"{title} 被判成 {m.verdict} —— 用户明确要求白名单优先")
 
 
 class TestDisablingASignalClosesItsEpisode(unittest.TestCase):
