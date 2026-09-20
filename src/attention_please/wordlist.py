@@ -25,6 +25,11 @@ class TitleMatch:
     verdict: TitleVerdict
     matched: str | None = None
     source: str = ""  # "whitelist" | "blacklist" | ""
+    # 白名单命中时, 如果标题**同时**命中了黑名单, 这里记下那个黑名单词。
+    # 判定仍然按白名单(见模块开头), 但调用方必须把它记一笔 —— 否则
+    # "考研数学基础班 - 知乎" 会被判成专注而且**什么都不留下**,
+    # 用户以为知乎被黑名单守着, 实际上被通用词「数学」整个盖住了。
+    shadowed: str | None = None
 
     @property
     def is_distraction(self) -> bool:
@@ -46,7 +51,8 @@ def classify(title: str | None, whitelist: list[str], blacklist: list[str]) -> T
 
     hit = _hit(low, whitelist)
     if hit is not None:
-        return TitleMatch(TitleVerdict.FOCUS, hit, "whitelist")
+        return TitleMatch(TitleVerdict.FOCUS, hit, "whitelist",
+                          shadowed=_hit(low, blacklist))
 
     hit = _hit(low, blacklist)
     if hit is not None:

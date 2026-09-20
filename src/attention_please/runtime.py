@@ -41,6 +41,7 @@ from .signals import (
 )
 from .store import Store
 from .ui import AlertRequest, AlertUI
+from .wordlist import classify
 
 LOCK_PORT = 47731          # 单实例: 这个端口被占用说明已经有一个在跑
 CAMERA_RETRY_SECONDS = 30
@@ -148,6 +149,8 @@ class Runtime:
         # 上一帧的单调时刻, 用来算"这一帧真实经过了多久"(写进 coverage_minute.seconds)。
         # 不判定时清零 —— 否则待机/让出一小时后的第一帧会把那一小时算成监控时间。
         self._last_tick_mono = 0.0
+        # 上一次见过的前台标题(只在标题变化时检查"白名单有没有盖住黑名单")
+        self._last_title_seen = ""
 
     # ------------------------------------------------------------------
     # 策略: 时间表 + 安静时段 + 启用信号
@@ -447,6 +450,32 @@ class Runtime:
         self.store.event(kind, at=at, signal=signal, level=level, duration=duration,
                          evidence=evidence, block=block, detail=detail)
 
+    def _note_shadowed_title(self, title: str | None) -> None:
+        """标题**同时**命中白名单和黑名单时记一笔 —— 不改判定, 但不许静默。
+
+        判定顺序是"白名单优先"(这是刻意的: 让「Bilibili 课堂」不被 bilibili 误杀)。
+        但你的白名单里有一批**通用名词**(数学/英语/电路/政治/考研/真题/单词/笔记/网课),
+        于是「考研数学基础班 - 知乎」「英语单词记忆法 - 小红书」「【考研政治】徐涛强化班 -
+        哔哩哔哩」全被判成**专注**, 而且**一条事件、一行日志都不留** —— 你以为黑名单
+        在守着知乎/微博/小红书, 实际上被一个通用词整个盖住了。
+
+        这里只做"让它可见": 标题变化时记一次 `title_shadowed`。要不要把优先级倒过来
+        (黑名单站点优先)是产品决策, 得你来定 —— 改了会直接影响误报率。
+        """
+        if not title or title == self._last_title_seen:
+            return
+        self._last_title_seen = title
+        try:
+            m = classify(title, self.cfg.wordlists.whitelist, self.cfg.wordlists.blacklist)
+        except Exception:  # noqa: BLE001 - 记一笔而已, 绝不能影响监控
+            return
+        if not m.shadowed:
+            return
+        self._say(f"⚠️ 标题同时命中白/黑名单, 按白名单算专注: 「{title[:50]}」"
+                  f"(黑名单词「{m.shadowed}」被白名单词「{m.matched}」盖住了)")
+        self._log("title_shadowed", evidence=f"白名单「{m.matched}」盖住黑名单「{m.shadowed}」",
+                  detail=title)
+
     def _log_span(self, kind: str, *, start_at: datetime, end_at: datetime,
                   duration: float, **fields) -> None:
         """记一段**有始有终**的时间。跨午夜要按天拆开。
@@ -536,6 +565,7 @@ class Runtime:
         self._drain_ui(mono)
         # 前台标题只取一次, 既给策略判断(要不要让出摄像头)也给这一帧的 Observation。
         title = foreground.foreground_title()
+        self._note_shadowed_title(title)
         policy = self._policy(now, title=title)
         enabled = frozenset(self.cfg.detection.enabled_signals)
         self._track_yield(policy, now)

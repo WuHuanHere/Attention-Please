@@ -121,6 +121,9 @@ class DayStats:
     wrong_seconds: float = 0.0
     # 弹窗通道自己报错的次数。提醒没弹出来属于"漏报", 必须在日报里能看见。
     ui_errors: int = 0
+    # 标题同时命中白/黑名单的次数(白名单优先 -> 判成专注)。这是"可能漏判"的信号:
+    # 通用词「数学」会盖住黑名单站点「知乎」。不改判定, 但必须可见。
+    shadowed_titles: int = 0
     nudges: int = 0
     away_nudges: int = 0              # "离开太久"的提醒次数(单独统计, 不算分心提醒)
     episodes: int = 0
@@ -311,6 +314,9 @@ class Store:
             elif kind == "ui_error":
                 # 弹窗通道自己炸了 = 提醒可能根本没弹出来。这是"漏报", 必须可见。
                 st.ui_errors += 1
+            elif kind == "title_shadowed":
+                # 白名单通用词盖住了黑名单站点 -> 判成专注, 可能漏判
+                st.shadowed_titles += 1
             elif kind == "camera_busy_end":
                 st.camera_busy_seconds += duration
             elif kind == "camera_yield_end":

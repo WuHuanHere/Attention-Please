@@ -326,6 +326,22 @@ class FocusStateMachine:
         self.suspended = False
         self.resume_until = now_ts + self.cfg.detection.resume_grace_seconds
 
+    def _close_episode(self, kind: SignalKind, obs: Observation) -> list[Action]:
+        """把某个信号正在进行的分集结掉(时长算到"现在")。没有开着的分集就返回空。"""
+        tr = self.tracks[kind]
+        if tr.episode_start is None:
+            return []
+        start = tr.signal_start if tr.signal_start is not None else tr.episode_start
+        actions: list[Action] = [EpisodeEnd(kind, obs.at, obs.ts,
+                                            max(0.0, obs.ts - start), tr.max_level,
+                                            tr.record_only, tr.evidence)]
+        tr.episode_start = None
+        tr.signal_start = None
+        tr.level_emitted = 0
+        tr.active_since = None
+        tr.last_active_ts = None
+        return actions
+
     # ---- 主循环 ----
     def update(self, obs: Observation, policy: Policy) -> list[Action]:
         actions: list[Action] = []
@@ -345,7 +361,12 @@ class FocusStateMachine:
             if kind is SignalKind.AWAY:
                 continue                      # 单独处理(见下), 不受 enabled_signals 约束
             if kind.value not in policy.enabled:
-                # 未启用的信号连记录都不做, 免得试跑数据里混进还没验证过的东西
+                # 未启用的信号连记录都不做, 免得试跑数据里混进还没验证过的东西。
+                # **但已经开着的分集必须先收口**: 被误报烦到、当场去 config.toml 里把
+                # "screen" 删掉是常见操作, 而删掉之后这个信号再没有任何代码路径去更新
+                # 或结束它的分集 —— 它会一直挂着直到块结束走 suspend(), 时长被拉到
+                # 几百秒(实测: 真实只观测到 ~12 秒, 被记成 700 秒)。
+                actions.extend(self._close_episode(kind, obs))
                 continue
             actions.extend(self._update_signal(kind, evals[kind], obs, policy))
 

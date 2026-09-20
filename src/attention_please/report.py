@@ -187,6 +187,12 @@ def build_report(cfg: Config, store: Store, day: str,
         # 否则"该弹的窗没弹"会完全不留痕迹。
         lines.append(f"- ⚠️ 提醒窗口报错 {st.ui_errors} 次 —— 有提醒可能**没有弹出来**, "
                      f"那几次你只会听到声音(详见日志里的 ui_error)")
+    if st.shadowed_titles:
+        # 白名单优先是刻意的(让「Bilibili 课堂」不被误杀), 但通用词会盖住黑名单站点。
+        # 这条不是错误, 是"可能漏判"的诚实披露 —— 要不要改优先级由你决定。
+        lines.append(f"- ⚠️ 有 {st.shadowed_titles} 次窗口标题**同时命中白/黑名单**, "
+                     f"按白名单算成了专注(例如「考研数学基础班 - 知乎」被通用词「数学」"
+                     f"盖住)。想更严就把 `[whitelist]` 里的通用词删掉几个")
     lines.append("")
     lines.append(f"*生成时间 {datetime.now():%Y-%m-%d %H:%M:%S}*")
     lines.append("")
