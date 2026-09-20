@@ -102,5 +102,65 @@ class TestStore(unittest.TestCase):
         again.close()
 
 
+class TestUnfinishedEpisodes(unittest.TestCase):
+    """守"程序在分心时被杀掉"这个洞(2026-09-20 用户报的 bug 顺带发现的)。
+
+    现场: 10:49:31 开了一段 screen 分心 + 响了 2 声提醒, 16 秒后程序被关掉。
+    `episode_start` 写了, `episode_end` 没写 —— 于是日报显示
+    **"提醒 2 次 / 分心 0 分钟(0 次)"**, 自相矛盾, 而且一声不响。
+
+    修法: 退出时收口(见 test_runtime_contract), 硬死的情况**只报段数、不编时长**。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(pathlib.Path(self.tmp.name) / "t.sqlite3")
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_orphan_start_is_visible(self):
+        self.store.event("episode_start", at=at(10, 49, 31), signal="screen")
+        self.store.event("nudge", at=at(10, 49, 31), signal="screen", level=1)
+        st = self.store.day_stats(DAY)
+        self.assertEqual(st.unfinished_episodes, 1, "有开头没结尾的分集必须报出来")
+        self.assertEqual(st.nudges, 1)
+        # 时长未知 -> 不许编: 分心时长仍然是 0, 只是不再"看起来没有分心"
+        self.assertEqual(st.episodes, 0)
+        self.assertEqual(st.distract_seconds, 0.0)
+
+    def test_paired_episode_is_not_unfinished(self):
+        self.store.event("episode_start", at=at(10, 0), signal="screen")
+        self.store.event("episode_end", at=at(10, 0, 20), signal="screen",
+                         level=1, duration=20)
+        st = self.store.day_stats(DAY)
+        self.assertEqual(st.unfinished_episodes, 0)
+        self.assertEqual(st.episodes, 1)
+        self.assertAlmostEqual(st.distract_seconds, 20.0)
+
+    def test_later_session_does_not_hide_an_earlier_orphan(self):
+        """崩溃过一轮、重启后又正常分心一段: 那一轮孤儿仍然要算。"""
+        self.store.event("episode_start", at=at(9, 0), signal="screen")
+        self.store.event("episode_start", at=at(11, 0), signal="screen")
+        self.store.event("episode_end", at=at(11, 0, 30), signal="screen",
+                         level=1, duration=30)
+        st = self.store.day_stats(DAY)
+        self.assertEqual(st.unfinished_episodes, 1)
+        self.assertEqual(st.episodes, 1)
+
+    def test_pose_and_away_orphans_are_not_distraction_orphans(self):
+        """pose 是"只记录的弱证据", away 走自己的账 —— 都不算分心分集。"""
+        self.store.event("episode_start", at=at(10, 0), signal="pose")
+        self.store.event("episode_start", at=at(10, 5), signal="away")
+        st = self.store.day_stats(DAY)
+        self.assertEqual(st.unfinished_episodes, 0)
+
+    def test_orphan_in_another_day_does_not_leak(self):
+        self.store.event("episode_start", at=datetime(2026, 5, 2, 10, 0), signal="screen")
+        self.assertEqual(self.store.day_stats(DAY).unfinished_episodes, 0)
+        self.assertEqual(self.store.day_stats("2026-05-02").unfinished_episodes, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

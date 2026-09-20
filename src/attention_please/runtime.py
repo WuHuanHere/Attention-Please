@@ -447,6 +447,7 @@ class Runtime:
               f"{self.cfg.general.camera_width}x{self.cfg.general.camera_height}, "
               f"检测频率 {self.cfg.general.tick_hz} Hz")
         self._say("=" * 72)
+        self._warn_unfinished_episodes()
         interval = 1.0 / max(0.5, self.cfg.general.tick_hz)
         next_tick = time.monotonic()
         self._summary_at = next_tick
@@ -753,6 +754,23 @@ class Runtime:
             self._say(f"日报生成失败(忽略): {type(exc).__name__}: {exc}")
 
     # ---- 摘要 ----
+    def _warn_unfinished_episodes(self) -> None:
+        """上一轮是不是"在分心过程中被杀掉/崩溃"的? 启动时必须说出来。
+
+        那段分心没有 episode_end, 于是既不计时长也不计次数, 而提醒已经响过了 ——
+        不说的话就是"漏报且不可见", 正好踩中第二条铁律。日报里也会写, 但那要等到
+        21:30; 启动时先说一句, 你当场就知道上次不是正常退出。
+        """
+        try:
+            st = self.store.day_stats(datetime.now().date().isoformat(),
+                                      tick_hz=self.cfg.general.tick_hz)
+        except Exception:  # noqa: BLE001 - 启动提示绝不能挡住监控
+            return
+        if st.unfinished_episodes:
+            self._say(f"⚠️ 今天有 {st.unfinished_episodes} 段分心没有收尾"
+                      f"(上次运行时在分心过程中被关掉/崩溃) —— 时长不明, "
+                      f"不会计入日报的分心时长")
+
     def _print_summary(self, now: datetime) -> None:
         st = self.store.day_stats(now.date().isoformat(),
                                   tick_hz=self.cfg.general.tick_hz)
@@ -763,6 +781,9 @@ class Runtime:
               f"| 人脸覆盖率 {st.coverage * 100:.0f}%")
         if st.camera_busy_seconds:
             self._say(f"    ⚠️ 因摄像头占用漏检 {st.camera_busy_seconds / 60:.1f} min")
+        if st.unfinished_episodes:
+            # 和上面那行"分心 N 次"并排看才会发现问题, 所以必须挨着写出来
+            self._say(f"    ⚠️ 另有 {st.unfinished_episodes} 段分心没有收尾(时长不明, 未计入)")
 
     def close(self) -> None:
         """释放资源。正常退出和测试都走这里, 别只关一半。
@@ -781,6 +802,15 @@ class Runtime:
 
     def shutdown(self) -> None:
         self._say("\n正在退出 ...")
+        # **退出前必须把进行中的分集收口**。否则这段分心既不计时长也不计次数, 而提醒
+        # 已经响过了 —— 日报就会出现"提醒 2 次 / 分心 0 分钟"这种自相矛盾的行
+        # (2026-09-20 实测: 10:49:31 那次分心刚开 16 秒, 程序就被关掉了)。
+        # suspend() 只会产出 EpisodeEnd / AwayChange(False), 不会有 Nudge 或
+        # EpisodeStart, 所以走 dispatch 是安全的: 不发声、不弹窗、不截图。
+        try:
+            self.dispatch(self.sm.suspend(time.monotonic(), datetime.now(), "shutdown"))
+        except Exception as exc:  # noqa: BLE001 - 退出路径上绝不能再往外抛
+            self.log.exception("shutdown.suspend", exc)
         if self.cap is not None:
             self.cap.release()
             self.cap = None

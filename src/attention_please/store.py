@@ -22,6 +22,10 @@ from pathlib import Path
 # tests/test_store_lock.py 里有守这条关系的测试。
 BUSY_TIMEOUT_SECONDS = 10
 
+# 哪些信号的分集才算"分心分集" —— 口径必须和 day_stats 里的一致:
+# away 的时长走 away_end(提醒次数也单独统计), pose 是"只记录不报警"的弱证据。
+DISTRACTION_SIGNALS = ("screen", "phone")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS event (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +64,9 @@ class DayStats:
     pause_seconds: float = 0.0
     blind_seconds: float = 0.0        # 看不清(人脸覆盖率不足)的时间
     pose_weak_seconds: float = 0.0    # 看不清的时间里, Pose 弱证据显示"低头/转头"的时长
+    # 有 episode_start 却没有 episode_end 的分集 = **程序在分心过程中被关掉/崩溃/蓝屏**。
+    # 它的时长是未知的(不是 0!), 所以只报"有几段", 绝不编一个数字出来 —— 宁可缺, 不可假。
+    unfinished_episodes: int = 0
     nudges: int = 0
     away_nudges: int = 0              # "离开太久"的提醒次数(单独统计, 不算分心提醒)
     episodes: int = 0
@@ -185,11 +192,17 @@ class Store:
                   tick_hz: float = 5.0) -> DayStats:
         self._fresh_read()
         st = DayStats(day=day, planned_seconds=planned_seconds)
+        # 分集的开头/结尾分开数, 用来找"有开头没结尾"的那种(见 unfinished_episodes)。
+        starts: dict[str, int] = {}
+        ends: dict[str, int] = {}
         cur = self.conn.execute(
             "SELECT kind, signal, level, duration FROM event WHERE day = ?", (day,))
         for kind, signal, _level, duration in cur.fetchall():
             duration = duration or 0.0
-            if kind == "episode_end":
+            if kind == "episode_start":
+                starts[signal] = starts.get(signal, 0) + 1
+            elif kind == "episode_end":
+                ends[signal] = ends.get(signal, 0) + 1
                 if signal == "away":
                     # "离开太久"的分集不是分心 —— 那段时间已经算进 away_seconds 了,
                     # 再计一次会重复扣减有效专注。
@@ -217,6 +230,16 @@ class Store:
                 st.camera_busy_seconds += duration
             elif kind == "camera_yield_end":
                 st.yield_seconds += duration
+
+        # 有开头没结尾的分集 = 程序在分心过程中被关掉/崩溃/蓝屏。
+        # **不能假装它不存在**: 提醒已经响过了, 而它既不计时长也不计次数, 于是日报会
+        # 出现"提醒 2 次 / 分心 0 分钟"这种自相矛盾的行(2026-09-20 实测: 10:49:31 那次
+        # 分心刚开 16 秒, 程序就被关掉了)。时长未知, 所以只数段数, 不编数字。
+        # 注: 退出时 runtime.shutdown() 会把进行中的分集收口, 所以这里剩下的都是"硬死"
+        # (被杀/崩溃/蓝屏)。pose 与 away 的分集不在这里计 —— 它们本来就不算分心分集。
+        st.unfinished_episodes = sum(
+            max(0, n - ends.get(sig, 0)) for sig, n in starts.items()
+            if sig in DISTRACTION_SIGNALS)
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"

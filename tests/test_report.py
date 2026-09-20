@@ -82,6 +82,29 @@ class TestReport(unittest.TestCase):
         self.assertIn("哔哩哔哩 - Chrome", text)
         self.assertIn("上厕所", text)
 
+    def test_unfinished_episode_is_visible_in_the_report(self):
+        """有开头没结尾的分集必须在日报里说出来(2026-09-20 顺带发现的洞)。
+
+        不说的话这一行会和"提醒次数"自相矛盾: 提醒响了 2 次, 分心却是"0 分钟(0 次)"。
+        """
+        self.store.event("episode_start", at=at(10, 49, 31), signal="screen")
+        self.store.event("nudge", at=at(10, 49, 31), signal="screen", level=1,
+                         detail="微信")
+        text = build_report(self.cfg, self.store, DAY)
+        self.assertIn("1 段没等到收尾", text)
+        self.assertIn("没有收尾", text)
+        self.assertIn("只会少算", text)
+        # 时长不许编: 分心仍然是 0 分钟
+        self.assertIn("| 分心 | 0 分钟(0 次)", text)
+
+    def test_report_says_nothing_when_all_episodes_are_closed(self):
+        self.store.event("episode_start", at=at(10, 0), signal="screen")
+        self.store.event("episode_end", at=at(10, 0, 20), signal="screen",
+                         level=1, duration=20)
+        text = build_report(self.cfg, self.store, DAY)
+        self.assertNotIn("没有收尾", text)
+        self.assertNotIn("没等到收尾", text)
+
     def test_coverage_warning_when_low(self):
         for i in range(10):
             self.store.coverage_tick(at(9, 0, i), pose_hit=True, face_hit=(i < 5),

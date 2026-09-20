@@ -81,7 +81,11 @@ def build_report(cfg: Config, store: Store, day: str,
                  + (f"({st.first_monitored}–{st.last_monitored})" if st.first_monitored else "")
                  + " |")
     lines.append(f"| 计划学习时长 | {_hm(planned_seconds)}(作息表) |")
-    lines.append(f"| 分心 | {_hm(st.distract_seconds)}({st.episodes} 次) |")
+    distract_txt = f"{_hm(st.distract_seconds)}({st.episodes} 次)"
+    if st.unfinished_episodes:
+        # 不写出来的话, 这一行会和下面"提醒次数"自相矛盾(提醒响过, 分心却是 0 次)
+        distract_txt += f" + **{st.unfinished_episodes} 段没等到收尾**"
+    lines.append(f"| 分心 | {distract_txt} |")
     lines.append(f"| 暂停 | {_hm(st.pause_seconds)} |")
     away_txt = _hm(st.away_seconds) + (f"(提醒过 {st.away_nudges} 次)" if st.away_nudges else "")
     lines.append(f"| 离开座位 | {away_txt} |")
@@ -95,6 +99,14 @@ def build_report(cfg: Config, store: Store, day: str,
     if missing:
         for note in missing:
             lines.append(f"> ⚠️ {note}")
+        lines.append("")
+
+    if st.unfinished_episodes:
+        # "漏报必须可见": 这段分心**确实发生过**(提醒都响过了), 只是我们不知道它多久。
+        # 编一个时长出来就是造假, 假装它不存在就是漏报 —— 所以单列, 并说清方向。
+        lines.append(f"> ⚠️ 有 {st.unfinished_episodes} 段分心**没有收尾**: 程序在分心过程中"
+                     f"被关掉/崩溃/蓝屏, 不知道它持续了多久。它**没有**计入上面的分心时长, "
+                     f"所以那个数字只会少算、不会多算(也就是有效专注会略微偏高)。")
         lines.append("")
 
     hours = store.busiest_distraction_hours(day)

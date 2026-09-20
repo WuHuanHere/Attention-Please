@@ -10,6 +10,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import tempfile
+import time
 import types
 import unittest
 from datetime import datetime
@@ -24,6 +25,8 @@ from attention_please.signals import (  # noqa: E402
     EpisodeEnd,
     EpisodeStart,
     Nudge,
+    Observation,
+    Policy,
     SignalKind,
 )
 
@@ -31,6 +34,8 @@ RAW = {
     "reminder": {"max_level_high": 3, "cooldown_seconds": 180,
                  "wrong_feedback_mute_seconds": 900},
     "schedule": {"block": [{"name": "测试", "start": "00:00", "end": "24:00"}]},
+    # 让 screen 信号真的能判出来(默认黑名单只在 config.toml 里, 测试用的 dict 是空的)
+    "blacklist": {"words": ["哔哩哔哩"]},
 }
 
 
@@ -133,6 +138,74 @@ class TestDispatchContract(unittest.TestCase):
                         return_value=pathlib.Path("x.jpg")) as save:
             self.rt.dispatch([EpisodeStart(SignalKind.SCREEN, "证据", now, 0.0, False)])
             save.assert_called_once()
+
+
+class TestShutdownClosesOpenEpisodes(unittest.TestCase):
+    """**退出时进行中的分集必须收口**(2026-09-20 实测踩到)。
+
+    现场: 10:49:31 开了一段 screen 分心并响了 2 声提醒, 16 秒后程序被关掉。
+    `episode_start` 写了、`episode_end` 没写 -> 日报显示"提醒 2 次 / 分心 0 分钟(0 次)",
+    自相矛盾而且一声不响。根因是 `shutdown()` 只 flush 了库, 没有把状态机里还开着的
+    分集结掉(而"暂停/离开时间表"走的是 suspend(), 本来就会收口)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = Config.from_dict(RAW, path=pathlib.Path(self.tmp.name) / "config.toml")
+        self.rt = Runtime(cfg, Calibration())
+        self.rt.notifier = types.SimpleNamespace(buzz=lambda *a, **k: None)
+        self.rt.ui = types.SimpleNamespace(show=lambda req: None)
+
+    def tearDown(self):
+        self.rt.close()
+        self.tmp.cleanup()
+
+    def _open_screen_episode(self, lead: float = 30.0) -> float:
+        """把状态机推到"screen 分集已经开着"的状态, 返回这集的信号起点(单调秒)。"""
+        now = datetime.now()
+        mono = time.monotonic()
+        policy = Policy(judging=True, enabled=frozenset({"screen"}))
+
+        def frame(ts: float) -> Observation:
+            return Observation(ts=ts, at=now, pose_present=True, yaw=0.0, pitch=0.0,
+                               title="哔哩哔哩 - 视频")
+
+        with mock.patch("attention_please.capture.save_composite",
+                        return_value=pathlib.Path("x.jpg")):
+            self.rt.dispatch(self.rt.sm.update(frame(mono - lead), policy))
+            # 第二帧越过 10 秒门槛 -> 开分集, 而信号起点是第一帧
+            self.rt.dispatch(self.rt.sm.update(frame(mono - lead + 11.0), policy))
+        return mono - lead
+
+    def test_open_episode_is_closed_at_shutdown(self):
+        day = datetime.now().date().isoformat()
+        self._open_screen_episode(lead=30.0)
+        self.assertEqual(self.rt.store.day_stats(day).episodes, 0, "还没结束, 不该有分集")
+
+        self.rt.shutdown()
+
+        st = self.rt.store.day_stats(day)
+        self.assertEqual(st.episodes, 1,
+                         "退出时进行中的分集没有收口 —— 日报会出现"
+                         "'提醒 N 次 / 分心 0 分钟'的自相矛盾")
+        self.assertGreaterEqual(st.distract_seconds, 30.0)
+        self.assertLess(st.distract_seconds, 35.0)
+        self.assertEqual(st.unfinished_episodes, 0, "已经收口了, 不该再算未收尾")
+
+    def test_shutdown_does_not_double_close(self):
+        """连点两次退出/测试收尾时不能重复记一集。"""
+        day = datetime.now().date().isoformat()
+        self._open_screen_episode()
+        self.rt.shutdown()
+        self.rt.shutdown()
+        self.assertEqual(self.rt.store.day_stats(day).episodes, 1)
+
+    def test_shutdown_without_episode_writes_nothing(self):
+        day = datetime.now().date().isoformat()
+        self.rt.shutdown()
+        st = self.rt.store.day_stats(day)
+        self.assertEqual(st.episodes, 0)
+        self.assertEqual(st.unfinished_episodes, 0)
 
 
 if __name__ == "__main__":
