@@ -26,6 +26,10 @@ BUSY_TIMEOUT_SECONDS = 10
 # away 的时长走 away_end(提醒次数也单独统计), pose 是"只记录不报警"的弱证据。
 DISTRACTION_SIGNALS = ("screen", "phone")
 
+# 不属于作息表任何 focus 块的时间, 在逐时段统计里归到这一桶:
+# 手动"现在开始学习"、提前开机、拖堂、以及块与块之间的空档都在这里。
+OUTSIDE_NAME = "时间表外"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS event (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +103,60 @@ def _subtract_spans(secs: float, start: float,
     return max(0.0, secs - removed)
 
 
+def _blind_seconds(m_ticks: int, m_face: int, m_judging: int,
+                   m_seconds: float, fallback: float) -> float:
+    """这一分钟里"判定中但脸看不到"的秒数。
+
+    判据(脸命中率 < 50%)和 day_stats 完全一样 —— 抽成函数是为了让"全天总数"和
+    "分时段"两条路径不可能各写一份、然后慢慢跑偏。
+    """
+    if not m_ticks or not m_judging or m_face / m_ticks >= 0.5:
+        return 0.0
+    return m_seconds if m_seconds > 0 else m_judging * fallback
+
+
+def _split_by_windows(start: float, end: float,
+                      windows: list[tuple[str, float, float]]
+                      ) -> list[tuple[int, float, float]]:
+    """把区间 `[start, end)` 按作息表切开, 返回 `[(桶号, 起, 止)]`, 桶号 -1 = 时间表外。
+
+    这是逐时段统计的地基: 分心和离开的区间**经常横跨两个时段**, 整段丢给哪一侧都会
+    让另一侧的数字凭空好看或难看。
+
+    作息表万一写重叠了, **靠前的窗口优先** —— 和 `Schedule.block_at`(返回第一个命中的
+    块)同一套语义, 而且绝不重复计数: 被前一个窗口认领过的时间不会再给后一个。
+    """
+    if end <= start:
+        return []
+    order = sorted(range(len(windows)), key=lambda i: windows[i][1])
+    out: list[tuple[int, float, float]] = []
+    cursor = start
+    while cursor < end:
+        hit, nxt = -1, end
+        for i in order:
+            ws, we = windows[i][1], windows[i][2]
+            if ws <= cursor < we:        # cursor 已经在窗口里 -> 认领到窗口末尾
+                hit, nxt = i, min(we, end)
+                break
+            if cursor < ws < nxt:        # 更早开始的窗口 -> 先切一段"表外"出来
+                nxt = ws
+        out.append((hit, cursor, nxt))
+        cursor = nxt
+    return out
+
+
+def _bucket_at(ts: float, windows: list[tuple[str, float, float]]) -> int:
+    """时刻 `ts` 落在哪个时段(没有就是 -1 = 时间表外)。
+
+    半开区间 `[起, 止)` —— 和 `ScheduleBlock.contains` 一致, 免得边界上的那一秒
+    被相邻两段同时认领。
+    """
+    for i, (_name, ws, we) in enumerate(windows):
+        if ws <= ts < we:
+            return i
+    return -1
+
+
 @dataclass
 class DayStats:
     day: str
@@ -134,6 +192,31 @@ class DayStats:
     monitored_seconds: float = 0.0    # **实际监控时长** —— 比值要用它当分母
     first_monitored: str = ""         # "HH:MM", 今天第一次判定的时刻
     last_monitored: str = ""          # "HH:MM"
+
+
+@dataclass
+class BlockStats:
+    """作息表里**某一个时段**的专注账(日报"各时段专注情况"那张表的一行)。
+
+    它和 `DayStats` 用的是同一批原始数据、同一套口径, 只是按时间切开。切开之后必须
+    **逐项可加**: 所有时段(含"时间表外"那一桶)加起来要等于 `DayStats` 的总数 ——
+    否则表里的数字会和标题上的数字打架, 而没有人会去手算, 它只会静默地骗人。
+    `tests/test_block_report.py` 里守着这条。
+    """
+
+    name: str
+    start_ts: float = 0.0            # "时间表外"这一桶没有窗口, 保持 0
+    end_ts: float = 0.0
+    outside: bool = False            # True = 不属于任何 focus 块的那一桶
+    planned_seconds: float = 0.0
+    monitored_seconds: float = 0.0
+    focus_seconds: float = 0.0
+    distract_seconds: float = 0.0
+    blind_seconds: float = 0.0
+    away_seconds: float = 0.0
+    episodes: int = 0
+    allowed_phone_seconds: float = 0.0
+    wrong_seconds: float = 0.0
 
 
 class Store:
@@ -359,27 +442,111 @@ class Store:
         fallback = 1.0 / max(tick_hz, 0.1)
         away_spans = self._away_spans(day)
         monitored = 0.0
-        cur = self.conn.execute(
-            "SELECT minute, ticks, face_hits, judging, seconds FROM coverage_minute"
-            " WHERE day = ?", (day,))
-        for _minute, m_ticks, m_face, m_judging, m_seconds in cur.fetchall():
-            if not m_ticks:
-                continue
+        for minute_ts, m_ticks, m_face, m_judging, m_seconds in self._minute_rows(day):
             monitored += m_seconds if m_seconds > 0 else m_ticks * fallback
             # 判定中但脸看不到的分钟 -> 记成"看不清"(不给专注时长, 也不当成分心)
-            if m_judging and m_face / m_ticks < 0.5:
-                secs = m_seconds if m_seconds > 0 else m_judging * fallback
+            blind = _blind_seconds(m_ticks, m_face, m_judging, m_seconds, fallback)
+            if blind:
                 # **离开的时间不许同时算进"看不清"**: 人不在座位上时人脸当然是 0%,
                 # 那些分钟会整段落进 blind, 而 away 又扣一次 -> 有效专注被扣两遍。
                 # 实测 2026-09-18: 离开窗口 15:09:59-15:20:49 全落在 blind 分钟里,
                 # 日报的"有效专注 5 小时 22 分"因此少算 10.8 分钟(应为 5 小时 32 分)。
-                st.blind_seconds += _subtract_spans(
-                    secs, datetime.fromisoformat(_minute).timestamp(), away_spans)
+                st.blind_seconds += _subtract_spans(blind, minute_ts, away_spans)
         st.monitored_seconds = monitored
 
         st.focus_seconds = max(0.0, st.monitored_seconds - st.distract_seconds
                                - st.blind_seconds - st.away_seconds)
         return st
+
+    def _minute_rows(self, day: str) -> list[tuple[float, int, int, int, float]]:
+        """这一天的逐分钟覆盖数据: `(分钟起点 epoch, ticks, face_hits, judging, seconds)`。
+
+        只返回有帧的分钟。`day_stats`(全天)和 `block_stats`(分时段)共用它 —— 两边必须
+        看同一批原始数据, 否则"各时段之和 = 全天总数"这条约束就守不住了。
+        """
+        self._fresh_read()
+        cur = self.conn.execute(
+            "SELECT minute, ticks, face_hits, judging, seconds FROM coverage_minute"
+            " WHERE day = ?", (day,))
+        return [(datetime.fromisoformat(m).timestamp(), t, f, j, float(s or 0.0))
+                for m, t, f, j, s in cur.fetchall() if t]
+
+    def block_stats(self, day: str, windows: list[tuple[str, float, float]],
+                    tick_hz: float = 5.0) -> list[BlockStats]:
+        """按作息表把这一天切开, 逐时段算专注账。
+
+        `windows` 来自 `Schedule.block_windows(day)`: `(名称, 起 epoch, 止 epoch)`。
+        返回每个时段一行(按作息表顺序), 末尾可能多一行"时间表外" —— 只有那里真的有
+        数据(手动学习 / 提前开机 / 拖堂)时才出现, 免得天天印一行全 0 的噪声。
+
+        口径和 `day_stats` **逐项一致**, 只是把每个区间按时间切开后分别累加:
+        分心分集按真实区间切, "看不清"也按真实区间切并同样扣掉"离开"(理由见 day_stats)。
+        """
+        windows = list(windows)
+        self._fresh_read()
+        stats = [BlockStats(name=name, start_ts=s, end_ts=e,
+                            planned_seconds=max(0.0, e - s))
+                 for name, s, e in windows]
+        outside = BlockStats(name=OUTSIDE_NAME, outside=True)
+        fallback = 1.0 / max(tick_hz, 0.1)
+        away_spans = self._away_spans(day)
+
+        def bucket(idx: int) -> BlockStats:
+            return outside if idx < 0 else stats[idx]
+
+        # 1) 监控时长与"看不清": 逐分钟摊到各时段
+        for minute_ts, m_ticks, m_face, m_judging, m_seconds in self._minute_rows(day):
+            secs = m_seconds if m_seconds > 0 else m_ticks * fallback
+            for idx, s, e in _split_by_windows(minute_ts, minute_ts + 60.0, windows):
+                # 一分钟的秒数按"落在该时段的分钟比例"摊。作息表边界都是整分钟,
+                # 所以实际是精确的; 只有手改出带秒的边界时才是近似。
+                bucket(idx).monitored_seconds += secs * (e - s) / 60.0
+            blind = _blind_seconds(m_ticks, m_face, m_judging, m_seconds, fallback)
+            if blind:
+                for idx, s, e in _split_by_windows(minute_ts, minute_ts + blind, windows):
+                    bucket(idx).blind_seconds += _subtract_spans(e - s, s, away_spans)
+
+        # 2) 分心分集与离开: 按真实区间切(它们经常横跨两个时段)
+        cur = self.conn.execute(
+            "SELECT kind, signal, ts, duration, detail FROM event WHERE day = ?", (day,))
+        for kind, signal, ts, duration, detail in cur.fetchall():
+            duration = float(duration or 0.0)
+            ts = float(ts)
+            if kind == "away_end":
+                for idx, s, e in _split_by_windows(ts - duration, ts, windows):
+                    bucket(idx).away_seconds += e - s
+                continue
+            if kind != "episode_end":
+                continue
+            if signal == "away":
+                continue      # 离开的时长走 away_end, 这里再计一次就是重复扣分
+            if signal == "pose":
+                continue      # 弱证据只记录, 不是分心(和 day_stats 同一口径)
+            flags = _flag_set(detail)
+            counted = not (flags & {"wrong", "record_only"})
+            if counted:
+                # 次数只算一次: 落在分集**结束**的那一刻所属的时段, 和
+                # busiest_distraction_hours 的分桶口径一致。
+                bucket(_bucket_at(ts, windows)).episodes += 1
+            for idx, s, e in _split_by_windows(ts - duration, ts, windows):
+                b = bucket(idx)
+                if "wrong" in flags:
+                    b.wrong_seconds += e - s
+                elif "record_only" in flags:
+                    b.allowed_phone_seconds += e - s
+                else:
+                    b.distract_seconds += e - s
+
+        for b in stats + [outside]:
+            b.focus_seconds = max(0.0, b.monitored_seconds - b.distract_seconds
+                                  - b.blind_seconds - b.away_seconds)
+        # "时间表外"只有真的有东西时才出现 —— 否则每天都会多印一行全 0 的噪声
+        if any((outside.monitored_seconds, outside.distract_seconds,
+                outside.blind_seconds, outside.away_seconds,
+                outside.allowed_phone_seconds, outside.wrong_seconds,
+                outside.episodes)):
+            stats.append(outside)
+        return stats
 
     def _away_spans(self, day: str) -> list[tuple[float, float]]:
         """这一天的"离开"时间区间(epoch 秒), 用来把它从"看不清"里扣掉。

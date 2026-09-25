@@ -32,7 +32,10 @@ from attention_please.signals import (  # noqa: E402
 )
 from attention_please.wordlist import TitleVerdict, classify  # noqa: E402
 
-DAY = "2026-09-20"
+# ⚠️ 必须跟着"今天"走: `_note_shadowed_title` 用的是真实 `datetime.now()`,
+# 写死日期就会在第二天整批变红(和 test_accounting_flags 同一个坑)。
+DAY = datetime.now().date().isoformat()
+
 # 和 config.toml 同款: 白名单里有通用名词, 黑名单里是站点名
 WHITE = ["数学", "英语", "电路", "政治", "考研", "真题", "单词", "笔记", "网课",
          "Visual Studio Code", "Bilibili 课堂"]

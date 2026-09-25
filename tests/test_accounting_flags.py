@@ -27,7 +27,13 @@ from attention_please.runtime import Runtime  # noqa: E402
 from attention_please.signals import Observation, Policy, SignalKind  # noqa: E402
 from attention_please.tray import Tray  # noqa: E402
 
-DAY = "2026-09-20"
+DAY = datetime.now().date().isoformat()
+# ⚠️ **日期必须跟着"今天"走**, 不能写死。runtime 给 `wrong` / `ui_error` 打的时间戳是
+# 真实的 `datetime.now()`, 而分集的时间戳来自测试伪造的 `Observation.at` —— 两边一旦
+# 跨日(写死的 2026-09-20 撞上真实日期), `day_stats(DAY)` 就只看得见一半事件,
+# 测试会莫名其妙地红(实测 2026-09-25: 5 个测试同时失败, 与代码改动无关)。
+TODAY = datetime.now()
+
 BASE = {
     "schedule": {"block": [{"name": "测试", "start": "00:00", "end": "24:00"}]},
     "privacy": {"save_captures": False},
@@ -65,7 +71,8 @@ class TestAllowedPhoneIsNotDistraction(unittest.TestCase):
     def _run_phone_episode(self) -> None:
         pol = Policy(judging=True, allow_phone=True, block_name="英语单词",
                      enabled=frozenset({"phone"}))
-        t0 = datetime(2026, 9, 20, 15, 10, 0)
+        t0 = TODAY.replace(hour=15, minute=10, second=0, microsecond=0)
+
 
         def frame(ts: float, yaw: float) -> Observation:
             return Observation(ts=ts, at=t0 + timedelta(seconds=ts), pose_present=True,
@@ -90,7 +97,7 @@ class TestAllowedPhoneIsNotDistraction(unittest.TestCase):
         rt = make_runtime(pathlib.Path(self.tmp.name) / "rt2")
         pol = Policy(judging=True, allow_phone=False, block_name="数学刷题",
                      enabled=frozenset({"phone"}))
-        t0 = datetime(2026, 9, 20, 10, 0, 0)
+        t0 = TODAY.replace(hour=10, minute=0, second=0, microsecond=0)
 
         def frame(ts: float, yaw: float) -> Observation:
             return Observation(ts=ts, at=t0 + timedelta(seconds=ts), pose_present=True,
@@ -120,7 +127,7 @@ class TestWrongFeedbackRemovesTheTime(unittest.TestCase):
 
     def _open_screen_episode(self) -> None:
         pol = Policy(judging=True, enabled=frozenset({"screen"}))
-        t0 = datetime(2026, 9, 20, 10, 0, 0)
+        t0 = TODAY.replace(hour=10, minute=0, second=0, microsecond=0)
 
         def frame(ts: float) -> Observation:
             return Observation(ts=ts, at=t0 + timedelta(seconds=ts), pose_present=True,
@@ -149,7 +156,8 @@ class TestWrongFeedbackRemovesTheTime(unittest.TestCase):
         self.rt._drain_ui(14.0)
 
         pol = Policy(judging=True, enabled=frozenset({"screen"}))
-        t0 = datetime(2026, 9, 20, 11, 0, 0)      # 换一小时, 避开静默窗
+        t0 = TODAY.replace(hour=11, minute=0, second=0, microsecond=0)   # 换一小时, 避开静默窗
+
         for ts in (0.0, 6.0, 12.0):
             self.rt.dispatch(self.rt.sm.update(
                 Observation(ts=ts, at=t0 + timedelta(seconds=ts), pose_present=True,

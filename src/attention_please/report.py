@@ -7,11 +7,11 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .config import Config
-from .store import Store
+from .store import OUTSIDE_NAME, Store
 
 
 def _hm(seconds: float) -> str:
@@ -21,19 +21,50 @@ def _hm(seconds: float) -> str:
     return f"{m // 60} 小时 {m % 60:02d} 分"
 
 
+def _clock(ts: float) -> str:
+    return f"{datetime.fromtimestamp(ts):%H:%M}"
+
+
+def _hm_short(seconds: float) -> str:
+    """分时段表**单元格**里的时长: 不足一分钟的用秒。
+
+    没有它的话, "某段有 2 次分心、共 20 秒"会显示成 `0 分钟(2 次)` —— 看着像记账出错。
+    门槛是"**四舍五入后**仍有 1 秒以上": 0.4 秒的余数(减法兜底后的零头)写 `0 秒`
+    比写 `0 分钟`更怪。
+    """
+    if 0 < round(seconds) < 60:
+        return f"{int(round(seconds))} 秒"
+    return _hm(seconds)
+
+
+def _visible(b) -> bool:
+    """这一桶在分钟精度下看得见吗 —— 看不见就别印, 免得每天多一行全 0 的噪声。
+
+    真实数据里必然有一点点"表外"秒数: 一次离开跨过某个时段的结尾, 尾巴就落在空档里。
+    20 秒的尾巴不值得占一行, 但**它仍然算在"各时段之和"里**, 所以下面的差额校验
+    不会因为不显示而失效(隐藏的是显示, 不是账)。
+    """
+    return b.episodes > 0 or any(int(round(v / 60.0)) for v in (
+        b.monitored_seconds, b.distract_seconds, b.blind_seconds,
+        b.away_seconds, b.allowed_phone_seconds, b.wrong_seconds))
+
+
+
 def _bar(fraction: float, width: int = 20) -> str:
     filled = max(0, min(width, int(round(fraction * width))))
     return "█" * filled + "·" * (width - filled)
 
 
 def uncovered_plan_note(cfg: Config, st, planned_seconds: float,
-                        day: str | None = None) -> list[str]:
+                        day: str | None = None,
+                        now: datetime | None = None) -> list[str]:
     """指出"计划里该学、但完全没有监控数据"的时间。
 
     这是"漏报必须可见"的延伸: 程序没跑/机器没开机的那段时间, 报表上什么都不显示,
     会被误读成"你没专注"。所以宁可写一行警告。
     """
     notes: list[str] = []
+    now = now or datetime.now()
     if not st.first_monitored:
         return ["今天没有任何监控数据(程序没运行过?)"]
     blocks = [b for b in cfg.schedule.blocks if b.is_focus]
@@ -47,9 +78,9 @@ def uncovered_plan_note(cfg: Config, st, planned_seconds: float,
                      f"(机器没开机 / 程序没跑), 不要当成没专注。")
     # "该监控却缺失"的分母必须是**已过去**的计划时段: 中午生成日报时,
     # 下午和晚上还没到, 用全天计划会算出"有 7 小时没监控"这种没意义的数字。
-    today = day or datetime.now().date().isoformat()
-    elapsed_plan = (cfg.schedule.elapsed_planned_seconds(datetime.now())
-                    if today == datetime.now().date().isoformat() else planned_seconds)
+    today = day or now.date().isoformat()
+    elapsed_plan = (cfg.schedule.elapsed_planned_seconds(now)
+                    if today == now.date().isoformat() else planned_seconds)
     gap = elapsed_plan - st.monitored_seconds
     if gap > 600:
         notes.append(f"计划里已经过去的 {_hm(elapsed_plan)} 中, 有约 {_hm(gap)} 没有监控数据"
@@ -57,8 +88,114 @@ def uncovered_plan_note(cfg: Config, st, planned_seconds: float,
     return notes
 
 
+def block_breakdown(cfg: Config, store: Store, st, day: str,
+                    now: datetime | None = None) -> list[str]:
+    """按**你自己的作息表**分时段统计专注时长(日报的一张表)。
+
+    为什么值得单开一张表: 全天只有一个"有效专注 X 小时"时, "上午两小时全神贯注、
+    下午三小时全废"会被平均成一个谁都不得罪的数字, 看不出该改哪一段。分时段之后,
+    计划 / 监控 / 有效专注 / 分心 / 看不清 / 离开 全都落到具体那一段上。
+
+    三条口径上的讲究(每条都对应一个踩过的坑):
+      * 分母仍然是**实际监控时长**(和标题一致)。用计划时长当分母会把"程序没跑"
+        算成"你没专注" —— 那正是 2026-09-18 修掉的那个误导。
+      * **还没到的时段写「未到」, 不写 0 分钟 0%**。中午打开日报时, 下午那个 0% 是假的。
+      * 已经过去、却一分钟都没监控到的时段写「无监控数据」而不是 0% —— 同理,
+        没有数据不等于没专注。具体缺在哪一段, 正好就是这张表的价值。
+    """
+    now = now or datetime.now()
+    now_ts = now.timestamp()
+    windows = cfg.schedule.block_windows(date.fromisoformat(day))
+    lines = ["## 各时段专注情况(按作息表)", ""]
+    if not windows:
+        lines.append("- (作息表里没有 focus 时段, 没法分时段统计)")
+        lines.append("")
+        return lines
+    rows = store.block_stats(day, windows, tick_hz=cfg.general.tick_hz)
+    # 差额校验用**全部**桶; 只有"时间表外"那一桶可以因为看不见而被藏起来(见 _visible)。
+    # 作息表里的时段**一个都不许省** —— "这一段一分钟都没监控到"正是这张表的价值。
+    summed = sum(b.focus_seconds for b in rows)
+    shown = [b for b in rows if not b.outside or _visible(b)]
+
+    lines.append("| 时段 | 计划 | 实际监控 | 有效专注 | 专注率 | 分心 | 看不清 | 离开 |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for b in shown:
+        if b.outside:
+            name, planned = OUTSIDE_NAME, "—"
+            started = True                # 表外本来就不在作息里, 无所谓"未到"
+        else:
+            name = f"{_clock(b.start_ts)}–{_clock(b.end_ts)} {b.name}"
+            planned = _hm(b.planned_seconds)
+            started = now_ts >= b.start_ts
+            if not started:
+                name += "(未到)"
+            elif b.start_ts <= now_ts < b.end_ts:
+                name += "(进行中)"
+        if not started:
+            lines.append(f"| {name} | {planned} | — | — | — | — | — | — |")
+            continue
+        if b.monitored_seconds > 0:
+            focus_cell = _hm_short(b.focus_seconds)
+            rate_cell = f"{b.focus_seconds / b.monitored_seconds * 100:.0f}%"
+        elif b.distract_seconds or b.blind_seconds or b.away_seconds:
+            # 有账但没有监控数据(典型: 离开的尾巴落在作息表外) —— 写「—」而不是
+            # 「无监控数据」, 因为它并不是"什么都没记到"。
+            focus_cell, rate_cell = _hm_short(b.focus_seconds), "—"
+        else:
+            # 已经过去却一分钟都没监控到: **不能写 0%**, 没有数据不等于没专注。
+            focus_cell, rate_cell = "—", "无监控数据"
+        dist = _hm_short(b.distract_seconds) + (f"({b.episodes} 次)" if b.episodes else "")
+        lines.append("| " + " | ".join([
+            name, planned, _hm_short(b.monitored_seconds), focus_cell, rate_cell, dist,
+            _hm_short(b.blind_seconds), _hm_short(b.away_seconds)]) + " |")
+    # 合计用**全天总数**(不是上表各行相加): 它是标题上那个数字, 两者必须对得上。
+    denom = st.monitored_seconds or st.planned_seconds
+    ratio = (st.focus_seconds / denom) if denom else 0.0
+    total_dist = _hm(st.distract_seconds) + (f"({st.episodes} 次)" if st.episodes else "")
+    # 一分钟都没监控到时写「无监控数据」而不是 0% —— 和上面各行的口径保持一致,
+    # 否则同一张表里"某段 0%"和"合计 0%"会一起把"没数据"说成"没专注"。
+    if st.monitored_seconds <= 0:
+        total_focus, total_rate = "—", "无监控数据"
+    else:
+        total_focus, total_rate = f"**{_hm(st.focus_seconds)}**", f"{ratio * 100:.0f}%"
+    lines.append(f"| **合计** | {_hm(st.planned_seconds)} | {_hm(st.monitored_seconds)} | "
+                 f"{total_focus} | {total_rate} | {total_dist} | "
+                 f"{_hm(st.blind_seconds)} | {_hm(st.away_seconds)} |")
+    lines.append("")
+
+    notes: list[str] = []
+    for b in shown:
+        label = OUTSIDE_NAME if b.outside else f"{_clock(b.start_ts)}–{_clock(b.end_ts)} {b.name}"
+        # 备注用**分钟**当门槛: 20 秒的"允许用手机"写进正文只是噪声, 表里已经能看到。
+        if b.allowed_phone_seconds >= 30:
+            notes.append(f"- {label} 里有 {_hm_short(b.allowed_phone_seconds)} 是「允许用手机」"
+                         f"时段(背单词等), 看手机只记录、不算分心")
+        if b.wrong_seconds >= 30:
+            notes.append(f"- {label} 里有 {_hm_short(b.wrong_seconds)} 被你判为误报, 已从分心里剔除")
+    if st.unfinished_episodes:
+        notes.append(f"- 有 {st.unfinished_episodes} 段分心**没等到收尾**, 连时长都不知道, "
+                     f"所以归不到任何时段 —— 它不在上表里(只会少算, 不会多算)")
+    # 正常情况两者**精确相等**(store.block_stats 和 day_stats 用同一批数据、同一套口径),
+    # 所以门槛取"四舍五入到分钟不为 0" —— 比这张表自己的精度还小的差额(几十秒)不值得
+    # 报一次警, 但**只要够一分钟**就一定是真的记账不一致, 不是舍入。
+    if int(round(abs(summed - st.focus_seconds) / 60.0)) >= 1:
+        # 真出现差额只有一种可能: 某一段的离开/分心时长超过了它自己的监控时长
+        # (例如离开的尾巴跨过了时段结尾, 或暂停期间离开计时还在走),
+        # 逐段按 0 兜底而全天只兜一次。
+        notes.append(f"- ⚠️ 上表各时段加起来({_hm(summed)})和合计({_hm(st.focus_seconds)})"
+                     f"差 {_hm(abs(summed - st.focus_seconds))}: 有某一段的离开/分心时长"
+                     f"超过了那一段的监控时长, 已按 0 兜底。**以合计为准**。")
+    for note in notes:
+        lines.append(note)
+    if notes:
+        lines.append("")
+    return lines
+
+
 def build_report(cfg: Config, store: Store, day: str,
-                 planned_seconds: float | None = None) -> str:
+                 planned_seconds: float | None = None,
+                 now: datetime | None = None) -> str:
+    now = now or datetime.now()
     if planned_seconds is None:
         planned_seconds = cfg.schedule.planned_seconds()
     st = store.day_stats(day, planned_seconds=planned_seconds,
@@ -106,7 +243,7 @@ def build_report(cfg: Config, store: Store, day: str,
     lines.append("")
 
     # 计划里本该被监控、但完全没有数据的时间 —— 必须写出来, 否则会被误读成"你在摸鱼"
-    missing = uncovered_plan_note(cfg, st, planned_seconds, day)
+    missing = uncovered_plan_note(cfg, st, planned_seconds, day, now)
     if missing:
         for note in missing:
             lines.append(f"> ⚠️ {note}")
@@ -124,6 +261,8 @@ def build_report(cfg: Config, store: Store, day: str,
         lines.append(f"> ⚠️ 有 {st.unfinished_away} 段「离开座位」**没有收尾**, 那段时间的"
                      f"离开时长是未知的, **没有**计入上面的离开时长。")
         lines.append("")
+
+    lines.extend(block_breakdown(cfg, store, st, day, now))
 
     hours = store.busiest_distraction_hours(day)
     lines.append("## 最常分心的时段")

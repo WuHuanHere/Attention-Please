@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import tomllib
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +95,32 @@ class Schedule:
 
     def in_focus_window(self, when: datetime | dtime) -> bool:
         return self.block_at(when) is not None
+
+    def block_windows(self, day: date) -> list[tuple[str, float, float]]:
+        """把作息表在 `day` 这一天展开成 `(名称, 起 epoch, 止 epoch)`, 按开始时间排序。
+
+        日报要**按你自己的作息**分时段统计专注时长, 而 event / coverage_minute 里存的
+        都是 epoch 秒, 所以必须先把 HH:MM 换算到当天的时间轴上。只算 focus 块 ——
+        非 focus 块在作息表里的含义就是"休息", 不该混进专注统计。
+
+        三个边界都跟 `planned_seconds` 保持同一口径(它们踩过的坑这里同样成立):
+          * `end < start` 是跨午夜, 止点落到**次日**;
+          * `start == end` 是空块(`contains()` 永远不命中), 直接丢掉 —— 否则会变成 24 小时;
+          * 用 `datetime.combine` 而不是"当天零点 + 秒数", 这样夏令时也不会有偏差。
+        """
+        out: list[tuple[str, float, float]] = []
+        for b in self.blocks:
+            if not b.is_focus:
+                continue
+            start = datetime.combine(day, b.start)
+            end = datetime.combine(day, b.end)
+            if end <= start:
+                if b.start == b.end:          # 空块(和 planned_seconds 同口径)
+                    continue
+                end = datetime.combine(day + timedelta(days=1), b.end)
+            out.append((b.name, start.timestamp(), end.timestamp()))
+        out.sort(key=lambda w: (w[1], w[2]))
+        return out
 
     def planned_seconds(self) -> float:
         """作息表里 focus 块的总时长 = 今天的"计划学习时长"(日报的分母)。"""
