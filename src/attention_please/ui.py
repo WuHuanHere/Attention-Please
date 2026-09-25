@@ -25,6 +25,8 @@ import queue
 import threading
 from dataclasses import dataclass
 
+from . import mdview
+
 
 @dataclass
 class AlertRequest:
@@ -47,7 +49,7 @@ class ReportRequest:
     title: str
     text: str
     path: str = ""          # 磁盘上的 md 文件; 窗口里的"用 VS Code 打开"会用到
-    plain: bool = True      # 去掉 markdown 记号后再显示(纯文本更好读)
+    plain: bool = False     # True = 退回纯文本; 默认渲染成带样式的预览
 
 
 @dataclass
@@ -224,12 +226,18 @@ class AlertUI:
             y = max(0, sh - h - 80) if corner else max(0, (sh - h) // 3)
             win.geometry(f"+{x}+{y}")
 
-        def place_center(win) -> None:
+        def place_center(win, min_w: int = 1000, min_h: int = 680) -> tuple[int, int]:
+            """把窗口放到屏幕中上位置, 返回最终尺寸(渲染表格要用它算可用宽度)。
+
+            比原来(720x560)宽一截: 日报里那张八列的表在 720 宽下只能缩到 7pt 才塞得下。
+            但**不许比屏幕还宽** —— 小屏幕上开一个超出屏幕的窗口, 右边的列就永远看不到了。
+            """
             sw = win.winfo_screenwidth()
             sh = win.winfo_screenheight()
-            w = max(win.winfo_width(), 720)
-            h = max(win.winfo_height(), 560)
+            w = max(560, min(max(win.winfo_width(), min_w), sw - 80))
+            h = max(480, min(max(win.winfo_height(), min_h), sh - 120))
             win.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+            return w, h
 
         def now_ms(win) -> float:
             return float(win.tk.call("clock", "milliseconds"))
@@ -323,15 +331,13 @@ class AlertUI:
             win.configure(bg="#1b1b1b")
             frame = tk.Frame(win, bg="#1b1b1b", padx=12, pady=10)
             frame.pack(fill="both", expand=True)
-            body = tk.Text(frame, wrap="word", width=86, height=28, bg="#111111",
+            body = tk.Text(frame, wrap="word", width=80, height=28, bg="#111111",
                            fg="#eaeaea", insertbackground="#eaeaea", relief="flat",
                            font=("Microsoft YaHei UI", 10), padx=12, pady=10)
             scroll = tk.Scrollbar(frame, command=body.yview)
             body.configure(yscrollcommand=scroll.set)
             scroll.pack(side="right", fill="y")
             body.pack(side="left", fill="both", expand=True)
-            body.insert("1.0", strip_markdown(req.text) if req.plain else req.text)
-            body.configure(state="disabled")
 
             # ⚠️ 注意: tk.Frame 的 padx/pady 是**控件选项, 只接受整数**;
             # (0, 10) 这种元组只有 pack()/grid() 认 —— 写在构造函数里会抛
@@ -354,14 +360,45 @@ class AlertUI:
                 except Exception as exc:  # noqa: BLE001
                     note_error("open_external", exc)
 
+            mode = {"plain": req.plain}
+
+            def render_now(avail_px: int) -> None:
+                body.configure(state="normal")
+                body.delete("1.0", "end")
+                if mode["plain"]:
+                    body.insert("1.0", strip_markdown(req.text))
+                else:
+                    try:
+                        mdview.render(body, req.text, avail_px=avail_px)
+                    except Exception as exc:  # noqa: BLE001
+                        # 渲染炸了**绝不能留一个空窗口**: 退回纯文本, 并把这次失败记成
+                        # ui_error(日报的"数据可信度"那一段会显示出来)。
+                        note_error("render_report", exc)
+                        body.delete("1.0", "end")
+                        body.insert("1.0", strip_markdown(req.text))
+                body.configure(state="disabled")
+                body.yview_moveto(0.0)
+
+            def toggle_plain() -> None:
+                mode["plain"] = not mode["plain"]
+                toggle.configure(text="看预览" if mode["plain"] else "看纯文本")
+                render_now(avail)
+
+            toggle = tk.Button(bar, text="看预览" if req.plain else "看纯文本",
+                               command=toggle_plain, width=10,
+                               font=("Microsoft YaHei UI", 10))
             tk.Button(bar, text="关闭", command=close_window, width=8,
                       font=("Microsoft YaHei UI", 10)).pack(side="right")
             if req.path:
                 tk.Button(bar, text="用 VS Code 打开", command=open_external,
                           font=("Microsoft YaHei UI", 10)).pack(side="right", padx=(0, 10))
+            toggle.pack(side="right", padx=(0, 10))
 
             win.update_idletasks()
-            place_center(win)
+            w, _h = place_center(win)
+            # 正文可用像素宽 = 窗口 - 外层 padx(12*2) - 滚动条 - Text 自己的 padx(12*2)
+            avail = max(320, w - 2 * 12 - 18 - 2 * 12 - 6)
+            render_now(avail)
             track(win)
             state["autoclose"] = False
 
