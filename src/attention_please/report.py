@@ -237,6 +237,11 @@ def build_report(cfg: Config, store: Store, day: str,
         # 否则这一行会写"离开 0 分钟", 而人明明走了(实测 2026-09-17)。
         away_txt += f" + **{st.unfinished_away} 段没等到收尾**"
     lines.append(f"| 离开座位 | {away_txt} |")
+    if st.camera_blank_seconds:
+        # 2026-09-27 之前, 这一行的时间是被错记成"离开座位"的。单列出来, 并且说清楚
+        # 它既不是专注也不是离开 —— 它是"我们没看见"。
+        lines.append(f"| 摄像头没有画面 | {_hm(st.camera_blank_seconds)}"
+                     f"({st.camera_blank_count} 次, 自动重开 {st.camera_reopen_count} 次) |")
     lines.append(f"| 看不清(脸不在画面) | {_hm(st.blind_seconds)} |")
     lines.append(f"| 提醒次数 | {st.nudges} |")
     lines.append(f"| 判定了「判定错了」 | {st.wrong_feedback} |")
@@ -297,6 +302,17 @@ def build_report(cfg: Config, store: Store, day: str,
                  f"(低于 90% 时「看手机」信号不可靠)")
     if st.camera_busy_seconds:
         lines.append(f"- ⚠️ 因摄像头被占用漏检 {_hm(st.camera_busy_seconds)}")
+    if st.camera_blank_seconds:
+        # "漏报必须可见" + "误报最烦"同时作用在这一行上:
+        # 摄像头给的是黑帧时, 我们**什么都没看见**, 那就既不能算专注、也不能算离开。
+        lines.append(f"- ⚠️ 摄像头**没有画面** {_hm(st.camera_blank_seconds)}"
+                     f"({st.camera_blank_count} 次, 已自动重开摄像头 "
+                     f"{st.camera_reopen_count} 次) —— 画面本身是黑的/被挡住的, "
+                     f"这段时间既不算专注、**也不算你离开座位**"
+                     f"(当场存了证据图, 在 captures/ 里)")
+    if st.unfinished_blank:
+        lines.append(f"- ⚠️ 有 {st.unfinished_blank} 段「没有画面」没等到恢复"
+                     f"(程序在故障期间被关掉/崩溃), 那段时间的长度未知, 没有计入上面。")
     if st.yield_seconds > 30:
         # "漏报必须可见": 让出期间**完全没有监控数据**(而它可能是你的学习时段),
         # 必须写清楚是主动让给别的程序了 —— 否则看报告的人会以为"我明明在学却没记上"。

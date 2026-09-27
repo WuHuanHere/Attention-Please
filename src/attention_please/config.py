@@ -205,6 +205,14 @@ class Detection:
     # 调大 = 更不容易判成低头(更少误报, 更多漏报)。
     pose_head_min_margin: float = 0.08
     away_seconds: float = 90.0
+    # --- 画面有效性(2026-09-27 加的, 见 framehealth.py) ---
+    # 灰度标准差**低于**它就是"没有画面": 全黑/全白/镜头被挡/采集流死了。
+    # 实测(1280x720 降到 160x120): 真实黑帧 0.01, 真实正常画面 65,
+    # 合成均匀噪声 7.2 —— 6.0 落在那条很宽的空隙里。调大 = 更容易判成没画面。
+    blank_std: float = 6.0
+    # 连续这么多秒没有画面才认定是摄像头故障。必须**远小于** away_seconds(90):
+    # 这样"摄像头瞎了"一定先于"人走了"被判定, 两者不会打架。
+    blank_seconds: float = 20.0
     # 离开多久才提醒一次(0 = 关闭)。级别上限是"低"(1 声), 所以一次离开只提醒一次;
     # 安静时段自动变成只弹窗。默认 15 分钟 —— 上个厕所不该被念, 跑去躺着就该。
     away_reminder_seconds: float = 900.0
@@ -370,6 +378,8 @@ class Config:
                 pose_head_turn_k=float(d.get("pose_head_turn_k", 1.5)),
                 pose_head_min_margin=float(d.get("pose_head_min_margin", 0.08)),
                 away_seconds=float(d.get("away_seconds", 90)),
+                blank_std=float(d.get("blank_std", 6.0)),
+                blank_seconds=float(d.get("blank_seconds", 20)),
                 away_reminder_seconds=float(d.get("away_reminder_seconds", 900)),
                 resume_grace_seconds=float(d.get("resume_grace_seconds", 20)),
                 enabled_signals=[str(x) for x in

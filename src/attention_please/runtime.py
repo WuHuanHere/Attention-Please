@@ -10,6 +10,10 @@
     日报里会明确写出"今天因摄像头占用漏检 X 分钟"。漏报必须可见。
   - **人脸覆盖率逐分钟入库**: 覆盖率低的时候"看手机"其实是瞎的,
     这段时间要记成"看不清", 既不算专注也不当分心。
+  - **"摄像头瞎了"不等于"你走了"**: 采集流死掉时 `cap.read()` 会返回 `ok=True` 的
+    **纯黑帧**(2026-09-27 实测), 于是人脸/Pose 全 0% —— 以前这就被算成"离开座位",
+    一错 36 分钟。现在先用 framehealth 判"这张图里有没有信息", 没有画面就记成
+    `camera_blank` 并自动重开摄像头, **绝不当成离开**。
 """
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import capture, foreground, input_activity
+from . import capture, foreground, framehealth, input_activity
 from .camera import CameraInfo, grab_frame, open_camera, set_buffer_size
 from .config import Calibration, Config
 from .logbook import Logbook, install_streams, safe_print
@@ -48,6 +52,12 @@ CAMERA_RETRY_SECONDS = 30
 # 摄像头抢回来一次, 会跟正在用它的程序(会议软件等)反复拉锯。
 CAMERA_RETRY_MAX_SECONDS = 300
 CAMERA_RELEASE_AFTER = 120
+# "没有画面"时自动重开摄像头的间隔: 第一次等 5 秒, 之后翻倍, 上限 2 分钟。
+# 实测这是**唯一有效的解药** —— 2026-09-27 09:27 那次采集流死了 36 分钟, 只有
+# "让出 + 收回摄像头"(release + 重新 open)才把它救回来; cap.read() 自己永远好不了。
+# 退避的理由和 CAMERA_RETRY_MAX_SECONDS 一样: 别跟正在用摄像头的程序反复拉锯。
+BLANK_REOPEN_SECONDS = 5
+BLANK_REOPEN_MAX_SECONDS = 120
 CONFIG_RELOAD_SECONDS = 60
 SUMMARY_EVERY_SECONDS = 300
 # 落盘间隔。**不是随手定的数字**: 每帧的 coverage_tick 会隐式开启一个写事务, 在 commit
@@ -108,6 +118,11 @@ class Runtime:
         self.cam_fail_since: datetime | None = None
         self.cam_next_retry: float = 0.0
         self.cam_fail_count: int = 0
+        # --- 画面有效性("摄像头瞎了" 和 "人走了" 必须分开) ---
+        self.health = framehealth.FrameHealthMeter()
+        self._blank_at: datetime | None = None    # 这一轮"没有画面"从什么时候开始(墙钟)
+        self._blank_reopens = 0                   # 这一轮故障里自动重开了几次
+        self._blank_count = 0                     # 连续的故障轮次(用来退避)
         self.idle_since: float = time.monotonic()
         self.running = True
         self._stop_event = threading.Event()
@@ -299,6 +314,12 @@ class Runtime:
             return "paused"
         if self.cam_fail_since is not None:
             return "camera_busy"
+        # 摄像头开着、帧也在来, 但画面是黑的/被挡住的 —— 和"打不开"一样必须一眼看出来,
+        # 否则托盘一直是绿的, 你会以为它在管你, 其实它什么都没看见(2026-09-27 实测)。
+        # 用 `_blank_count` 而不是 `_blank_at`: 只有**判定成故障**的才配得上这个状态,
+        # 刚打开摄像头时抖一两帧黑不该让图标闪一下。
+        if self._blank_count > 0:
+            return "no_picture"
         if self._policy(datetime.now()).camera_yield:
             return "yielded"
         if not self._policy(datetime.now()).judging:
@@ -315,6 +336,7 @@ class Runtime:
                                       tick_hz=self.cfg.general.tick_hz)
             state = {"judging": "判定中", "idle": "待机", "paused": "已暂停",
                      "camera_busy": "摄像头不可用",
+                     "no_picture": "摄像头没有画面(全黑/被挡)",
                      "yielded": "已让出摄像头",
                      "away": "离开座位(只记录)"}.get(self.state_key(), self.state_key())
             block = self._policy(datetime.now()).block_name
@@ -355,6 +377,8 @@ class Runtime:
         # 只留 1 帧缓冲, 否则会读到几秒前的旧画面(必须用 CAP_PROP_BUFFERSIZE, 别写魔数)
         set_buffer_size(cap, 1)
         self.cap = cap
+        # 刚打开的几帧本来就可能是黑的, 上一帧的画面也不作数了 —— 重新开始量。
+        self.health.reset()
         self.cam_info = CameraInfo(index=self.cfg.general.camera_index, opened=True,
                                    backend=backend,
                                    width=int(cap.get(3)), height=int(cap.get(4)))
@@ -598,6 +622,28 @@ class Runtime:
             self._last_tick_mono = 0.0
             return
 
+        # 有帧、但画面里有没有信息? —— 这一问是 2026-09-27 那个 bug 的分界线。
+        # 采集流死掉时 read() 返回的是 `ok=True` 的纯黑帧, 下面那句 `if not ok` 永远
+        # 抓不到; 而纯黑帧喂给 Face/Pose 只会得到 0%, 于是"看不到"被记成"你走了"。
+        reading = self.health.reading(frame)
+        verdict = self.health.watch.observe(
+            reading, mono,
+            blank_seconds=self.cfg.detection.blank_seconds,
+            blank_std=self.cfg.detection.blank_std)
+        if verdict == framehealth.BLANK:
+            # 没有画面: **不喂模型、不记监控、不判定**。既不算专注, 也不算分心,
+            # 更不算离开 —— 这张图里根本没有"你在不在"这个信息。
+            if self._blank_at is None:
+                self._blank_at = now - timedelta(
+                    seconds=self.health.watch.blank_for(mono))
+            self._blank_tick(mono, now, reading, policy)
+            return
+        if verdict == framehealth.TRIP:
+            self._no_picture(mono, now, reading, frame, policy, enabled)
+            return
+        if self._blank_at is not None:
+            self._picture_back(mono, now)
+
         ts_ms = int((mono - self.t0) * 1000)
         feats = self.analyzer.analyze(frame, ts_ms, now=mono)
         self._last_frame = frame
@@ -656,15 +702,117 @@ class Runtime:
                     parts.append(f"{key}:{'/'.join(bits)}")
             if parts:
                 msg += " | " + " ".join(parts)
+            # 掉速也要说出来: 采集流快死的时候最先露头的现象就是帧率塌下来
+            # (2026-09-27 实测 5.0 -> 3.9 -> 2.9 -> 0.95 Hz, 然后才是黑帧)。
+            if rate < self.cfg.general.tick_hz * 0.6 and self._tick_count >= 5:
+                msg += "  ⚠️ 掉速"
             self._say(msg)
-            self._status_at = mono
-            self._tick_count = 0
-            self._face_count = 0
+            self._status_reset(mono)
 
         if mono - self._summary_at > SUMMARY_EVERY_SECONDS:
             self._summary_at = mono
             self._print_summary(now)
             self.store.flush()
+
+    def _status_reset(self, mono: float) -> None:
+        self._status_at = mono
+        self._tick_count = 0
+        self._face_count = 0
+
+    # ---- "摄像头没有画面"(和"你离开座位"是两件事) ----
+    def _blank_tick(self, mono: float, now: datetime, reading, policy: Policy) -> None:
+        """没有画面时的一帧: 只数帧率和每分钟报一次, **不产生任何判定**。
+
+        帧率照实累计(它本身就是最重要的证据: 黑帧那次是 1/1.05s), 但人脸次数不加 ——
+        分母里混进"根本没画"的帧只会让覆盖率这个数字失去意义。
+        """
+        self._tick_count += 1
+        self._last_tick_mono = 0.0
+        if mono - self._status_at <= 60:
+            return
+        rate = self._tick_count / max(1e-6, mono - self._status_at)
+        self._say(f"[{now:%H:%M:%S}] ⚠️ 没有画面·{policy.block_name} | {rate:.1f} Hz | "
+                  f"{reading.describe()} | 已 {self.health.watch.blank_for(mono):.0f} 秒")
+        self._status_reset(mono)
+
+    def _no_picture(self, mono: float, now: datetime, reading, frame,
+                    policy: Policy, enabled: frozenset) -> None:
+        """连续 `blank_seconds` 秒没有画面 -> 按**设备故障**处理, 并自动重开摄像头。
+
+        三件事必须同时做到, 少一件就是踩铁律:
+          1. **不许算成离开座位**: 这里走 suspend(), 把进行中的分集/离开收口。
+             (dispatch 的返回值不能丢 —— 丢了就留下"有开头没结尾"的孤儿, 见上面注释。)
+          2. **必须可见**: `camera_blank` 事件 + 当场存一张证据图 + 托盘变色/气泡。
+             没有证据图的话, 下一次只能靠猜"是摄像头坏了还是我真的走了"。
+          3. **必须自救**: 释放并重开采集流。实测这是唯一有效的解药 ——
+             read() 自己永远不会好, 而让用户手动"让出+收回"就是把 bug 转嫁给人。
+        """
+        span = self.health.watch.blank_for(mono)
+        rate = self._tick_count / max(1e-6, mono - self._status_at)
+        detail = f"{reading.describe()}; 帧率 {rate:.1f} Hz"
+        first = self._blank_count == 0
+        self._blank_count += 1
+        if first:
+            self._log("camera_blank", at=now, detail=detail)
+            self._say(f"⚠️ 摄像头**没有画面**({detail}) —— 这段时间**不算你离开座位**, "
+                      f"正在自动重开摄像头 ...")
+            self._save_no_picture(frame, now, reading)
+        # 复位 Pose 弱证据的直立基准: 基准是"你最近的样子", 而这段时间我们什么都没看见。
+        if self.analyzer is not None:
+            self.analyzer.pose_head_estimator.reset()
+        self.dispatch(self.sm.update(Observation(ts=mono, at=now),
+                                     Policy(judging=False, enabled=enabled)))
+        self._release_camera(None)          # 让出时的原因由上面那行说清楚了
+        self._blank_reopens += 1
+        delay = min(BLANK_REOPEN_SECONDS * (2 ** (self._blank_count - 1)),
+                    BLANK_REOPEN_MAX_SECONDS)
+        self.cam_next_retry = mono + delay
+        self.health.reset()                 # 重开之后重新计时(刚打开的几帧本来就可能是黑的)
+        self._last_tick_mono = 0.0
+        self._log("camera_reopen", at=now, duration=delay,
+                  detail=f"没有画面 {span:.0f} 秒, 第 {self._blank_count} 次自动重开")
+        self._say(f"   (已经 {span:.0f} 秒没有画面; 自动重开摄像头, {delay:.0f} 秒后重试)")
+
+    def _picture_back(self, mono: float, now: datetime) -> None:
+        """画面回来了 —— 结账, 并说清楚这段空白有多长(它是日报里那一行的来源)。
+
+        只有**真的判定成故障过**(`_blank_count > 0`)才记账: 摄像头刚打开时抖一两帧黑
+        是正常的, 给它记一笔 `camera_blank_end` 只会往日报里塞一个没有意义的 0 分钟。
+        """
+        span = (now - self._blank_at).total_seconds() if self._blank_at else 0.0
+        tripped = self._blank_count > 0
+        reopens = self._blank_reopens
+        self._blank_at = None
+        self._blank_reopens = 0
+        self._blank_count = 0
+        if not tripped:
+            return
+        self._log("camera_blank_end", at=now, duration=span,
+                  detail=f"自动重开 {reopens} 次")
+        if span >= 60:
+            self._say(f"✅ 摄像头画面恢复(此前 {span / 60:.1f} 分钟没有画面"
+                      f" —— 那段时间不算你离开座位; 自动重开 {reopens} 次)")
+
+    def _save_no_picture(self, frame, now: datetime, reading) -> None:
+        """存一张"当时到底看到了什么"的证据图(黑帧那次存下来就是纯黑的下半张)。
+
+        这是"漏报必须可见"的最后一道保险: 没有它, 事后无法区分
+        "摄像头坏了"和"程序判定错了"。按 privacy 配置走, 失败绝不影响监控。
+        """
+        pv = self.cfg.privacy
+        if not pv.save_captures:
+            return
+        try:
+            path = capture.save_composite(
+                self.cfg.capture_dir, at=now, frame_bgr=frame,
+                width=pv.capture_width, screen=True, camera=frame is not None,
+                note="NO PICTURE")
+        except Exception as exc:  # noqa: BLE001 - 存图失败绝不能拖垮监控
+            self.log.exception("no_picture.capture", exc)
+            return
+        if path is not None:
+            self._log("capture", at=now, detail=str(path))
+            self._say(f"   已存证据图: {path.name}({reading.describe()})")
 
     # ---- 动作派发 ----
     def dispatch(self, actions: list, frame=None) -> None:
@@ -894,6 +1042,11 @@ class Runtime:
               f"| 人脸覆盖率 {st.coverage * 100:.0f}%")
         if st.camera_busy_seconds:
             self._say(f"    ⚠️ 因摄像头占用漏检 {st.camera_busy_seconds / 60:.1f} min")
+        if st.camera_blank_seconds:
+            # 必须和"离开座位"并排看: 它以前就是被错算成离开的那一段。
+            self._say(f"    ⚠️ 摄像头没有画面 {st.camera_blank_seconds / 60:.1f} min"
+                      f"({st.camera_blank_count} 次, 自动重开 {st.camera_reopen_count} 次)"
+                      f" —— 不算离开座位")
         if st.unfinished_episodes:
             # 和上面那行"分心 N 次"并排看才会发现问题, 所以必须挨着写出来
             self._say(f"    ⚠️ 另有 {st.unfinished_episodes} 段分心没有收尾(时长不明, 未计入)")
@@ -931,6 +1084,13 @@ class Runtime:
             self.dispatch(self.sm.suspend(time.monotonic(), datetime.now(), "shutdown"))
         except Exception as exc:  # noqa: BLE001 - 退出路径上绝不能再往外抛
             self.log.exception("shutdown.suspend", exc)
+        # 退出时也要把"没有画面"这一段收口 —— 否则那段时间的长度永远停在"未知",
+        # 而它恰恰是"我明明在学却没记上"的那种时间, 必须能进日报。
+        try:
+            if self._blank_at is not None:
+                self._picture_back(time.monotonic(), datetime.now())
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("shutdown.blank", exc)
         if self.cap is not None:
             self.cap.release()
             self.cap = None

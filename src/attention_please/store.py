@@ -188,6 +188,13 @@ class DayStats:
     wrong_feedback: int = 0
     camera_busy_seconds: float = 0.0
     yield_seconds: float = 0.0        # 把摄像头让给别的程序(会议/通话/直播)的时长
+    # 摄像头**开着**、帧也在来, 但画面是黑的/被挡住的时长(2026-09-27 加)。
+    # 它和 camera_busy_seconds 是两回事: 那个是"打不开", 这个是"打开了但什么都没看见"。
+    # 关键是: 这段时间**不算离开座位** —— "看不到"不等于"你走了"。
+    camera_blank_seconds: float = 0.0
+    camera_blank_count: int = 0       # 有几段(不是几次重开)
+    camera_reopen_count: int = 0      # 自动重开摄像头的次数
+    unfinished_blank: int = 0         # 没等到恢复就退出/被杀的那几段
     coverage: float = 0.0             # 人脸覆盖率 0..1
     monitored_seconds: float = 0.0    # **实际监控时长** —— 比值要用它当分母
     first_monitored: str = ""         # "HH:MM", 今天第一次判定的时刻
@@ -348,6 +355,7 @@ class Store:
         starts: dict[str, int] = {}
         ends: dict[str, int] = {}
         away_starts = away_ends = 0
+        blank_starts = blank_ends = 0
         cur = self.conn.execute(
             "SELECT kind, signal, level, duration, detail FROM event WHERE day = ?", (day,))
         for kind, signal, _level, duration, detail in cur.fetchall():
@@ -402,6 +410,14 @@ class Store:
                 st.shadowed_titles += 1
             elif kind == "camera_busy_end":
                 st.camera_busy_seconds += duration
+            elif kind == "camera_blank":
+                st.camera_blank_count += 1
+                blank_starts += 1
+            elif kind == "camera_blank_end":
+                blank_ends += 1
+                st.camera_blank_seconds += duration
+            elif kind == "camera_reopen":
+                st.camera_reopen_count += 1
             elif kind == "camera_yield_end":
                 st.yield_seconds += duration
 
@@ -418,6 +434,9 @@ class Store:
         # 实测(2026-09-17): 21:29:11 离开, 最后一个时间表块 21:30:00 结束, away_end 被丢,
         # 日报就写「离开座位 0 分钟」—— 人明明走了。现在单独报出来。
         st.unfinished_away = max(0, away_starts - away_ends)
+        # "没有画面"同理: 有 camera_blank 没有 camera_blank_end = 程序在故障期间被杀/崩溃,
+        # 那段时长未知。只报段数, 不编数字(和上面两条一个口径)。
+        st.unfinished_blank = max(0, blank_starts - blank_ends)
 
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(ticks),0), COALESCE(SUM(pose_hits),0),"

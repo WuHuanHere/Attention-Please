@@ -2,7 +2,8 @@
 
 状态用颜色区分(托盘图标很小, 颜色比文字快):
   绿 = 判定中   灰 = 待机(时间表外)   黄 = 已暂停   红 = 摄像头不可用
-  蓝 = 人不在画面里(只记录)   紫 = 已让出摄像头(给别的程序用)
+  橙 = 摄像头开着但没有画面(全黑/被挡)   蓝 = 人不在画面里(只记录)
+  紫 = 已让出摄像头(给别的程序用)
 
 菜单里的"暂停"必须填理由 —— 这就是"有代价的暂停"的代价本身, 理由会进日报。
 输入框走 ui.AlertUI(整个进程只有一个 Tk 实例), 所以这里只发请求、不等结果。
@@ -27,6 +28,8 @@ STATE_COLORS = {
     "idle": (149, 165, 166),
     "paused": (241, 196, 15),
     "camera_busy": (231, 76, 60),
+    # 橙: 摄像头开着、帧也在来, 但画面是黑的 —— "我在看着你"是假的, 必须一眼看出来。
+    "no_picture": (230, 126, 34),
     "away": (52, 152, 219),      # 蓝: 人不在画面里(只记录, 不提醒)
     "yielded": (155, 89, 182),   # 紫: 摄像头让给别的程序了(会议/通话/直播)
 }
@@ -66,6 +69,9 @@ class Tray:
         self.report_dir = report_dir
         self.icon = None
         self._last_state = ""
+        # 上一次**主动说过**的状态(只用来决定"恢复"要不要报一句); 和 _last_state 分开,
+        # 因为后者每次刷新都在变, 而"没有画面"这一条必须等真的恢复才收尾。
+        self._last_announced = ""
 
     # ---- 菜单动作 ----
     def _pause(self) -> None:
@@ -189,7 +195,11 @@ class Tray:
 
     def _refresh_icon(self) -> None:
         state = self.rt.state_key()
+        moved = state != self._last_state
         self._last_state = state
+        # 先announce再判断 icon: 让这条逻辑在没有图标(单测)时也能跑,
+        # 而 _notify 自己会容忍 icon 为 None。
+        self._announce_state(state, moved)
         if self.icon is None:
             return
         try:
@@ -197,6 +207,22 @@ class Tray:
             self.icon.title = self.rt.status_text()
         except Exception:  # noqa: BLE001
             pass
+
+    def _announce_state(self, state: str, moved: bool) -> None:
+        """状态**变了**才弹一次气泡(不发声)。
+
+        为什么"没有画面"值得主动说一句: 那一刻托盘本来是绿的/蓝的, 你完全看不出它已经
+        瞎了 —— 2026-09-27 那 40 分钟就是这么过去的。它**不是**分心提醒, 所以不响铃、
+        也不计入提醒次数; 恢复时说一句, 免得你以为它一直坏着。
+        """
+        if not moved:
+            return
+        if state == "no_picture":
+            self._notify("⚠️ 摄像头没有画面(全黑/被挡住)。这段时间不算你离开座位, "
+                         "正在自动重开摄像头 —— 详情见今天的日报。")
+        elif self._last_announced == "no_picture":
+            self._notify("✅ 摄像头画面恢复了。")
+        self._last_announced = state
 
     # ---- 菜单 ----
     def _menu(self):

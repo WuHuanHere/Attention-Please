@@ -156,6 +156,57 @@ class TestTray(unittest.TestCase):
         self.assertFalse(self.rt.running)
 
 
+class TestNoPictureIsAnnounced(unittest.TestCase):
+    """"摄像头没有画面"必须当场说一次(不发声), 恢复时再说一次。
+
+    为什么值得弹气泡: 那一刻托盘本来是绿的/蓝的, 你完全看不出它已经瞎了 ——
+    2026-09-27 那 40 分钟就是这么过去的(用户是靠自己发现不对劲才去动摄像头的)。
+    它**不是**分心提醒, 所以不响铃、也不计入提醒次数。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        cfg = Config.from_dict(RAW, path=self.root / "config.toml")
+        self.rt = Runtime(cfg, Calibration())
+        self.rt.notifier = types.SimpleNamespace(buzz=lambda *a, **k: None)
+        self.rt.ui = types.SimpleNamespace(show=lambda req: None,
+                                           ask_reason=lambda *a: None,
+                                           drain=lambda: [])
+        self.tray = Tray(self.rt, cfg.report_dir)
+        self.said: list[str] = []
+        self.tray._notify = lambda message, title="attention_please": self.said.append(message)
+
+    def tearDown(self):
+        self.rt.close()
+        self.tmp.cleanup()
+
+    def test_transition_into_and_out_of_no_picture(self):
+        self.rt._blank_count = 0
+        self.tray._refresh_icon()                 # 先落到一个普通状态
+        self.assertEqual(self.said, [])
+
+        self.rt._blank_count = 1                  # 判定成"没有画面"
+        self.assertEqual(self.rt.state_key(), "no_picture")
+        self.tray._refresh_icon()
+        self.assertEqual(len(self.said), 1, f"应该弹一次气泡: {self.said}")
+        self.assertIn("没有画面", self.said[0])
+        self.assertIn("不算你离开座位", self.said[0])
+
+        self.tray._refresh_icon()                 # 状态没变: 不许再弹
+        self.assertEqual(len(self.said), 1)
+
+        self.rt._blank_count = 0                  # 画面回来了
+        self.tray._refresh_icon()
+        self.assertEqual(len(self.said), 2)
+        self.assertIn("恢复", self.said[1])
+
+    def test_no_picture_state_has_its_own_color(self):
+        self.assertIn("no_picture", STATE_COLORS)
+        self.assertNotEqual(STATE_COLORS["no_picture"], STATE_COLORS["judging"])
+        self.assertNotEqual(STATE_COLORS["no_picture"], STATE_COLORS["camera_busy"])
+
+
 class TestTrayDoesNotLieAboutBookkeeping(unittest.TestCase):
     """记账失败时托盘**不许**报成功。
 
