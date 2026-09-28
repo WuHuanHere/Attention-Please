@@ -775,6 +775,27 @@ pitch**,但"头没低"**不等于**"头朝前" —— 看手机时头是抬着�
     ⚠️ `git push` 需要 Git Credential Manager, 而**沙箱会拦住它**(msys `sh.exe` 报
     "couldn't create signal pipe, Win32 error 5") —— 需要用 `danger-full-access` 跑一次。
 
+    ⚠️ **GitHub 常常连不上, 而 Gitee 一直好使** —— 两条几乎总是同时适用:
+    `Failed to connect to github.com port 443 ... Couldn't connect to server` /
+    `Recv failure: Connection was reset`。这不是凭据问题, 也不是仓库问题。
+
+    诊断顺序(2026-09-28 实测有效, 照做别绕):
+    1. `Invoke-WebRequest https://github.com -Method Head` 能通、而 git 连不上
+       → 就是下面这条代理的事, 不是网断了;
+    2. 看系统代理(`HKCU:\...\Internet Settings` 的 `ProxyEnable/ProxyServer`):
+       本机是 **`127.0.0.1:7897`**, 端口确实开着;
+       **PowerShell/.NET 走系统代理, 而 git 的 libcurl 不吃系统代理**, 环境变量里也没有
+       `http_proxy` —— 所以 git 直连必然超时;
+    3. 于是**显式把代理交给 git**, 两个远端分开推(一条 `git push` 会因为 GitHub 失败
+       而整体报错):
+       ```
+       git -c http.proxy=http://127.0.0.1:7897 push https://github.com/WuHuanHere/Attention-Please.git main
+       git push https://gitee.com/WuHuanHere/attention-please.git main
+       ```
+       (别写进 `git config` 常驻: 代理一关, 所有 git 操作都会卡 21 秒才失败。)
+    4. 推完**用 `git ls-remote` 核对两边的 HEAD 等于本地 HEAD** —— `git push` 打印的
+       成功行不足以证明(有一次只推上了 Gitee)。
+
 ---
 
 ## 12. 快速索引
