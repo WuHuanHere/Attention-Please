@@ -265,6 +265,12 @@ scripts/
    库里记了一笔"提醒", 你却既没听见也没看见(2026-09-18 实测抓到)。
    修法:所有输出走 `logbook.safe_print()`(编不出来的字符降级成 `?`, 绝不抛异常),
    runtime 内用 `self._say()`;回归测试 `tests/test_encoding.py`(7 项)。
+4c. **正在被另一个进程追加写入的文件, NTFS 报的 `Length` 可能是过期的(甚至是 0)**。
+   实测(2026-09-28):`data/logs/2026-09-28.log` 的目录项写着 0 字节, 而 `Get-Content` 读出来
+   有 71621 个字符 —— 差点当成"日志坏了"去查。要判断大小就读内容(`Get-Content -Raw`)
+   或等句柄关闭;**别信 `Get-ChildItem` 的 Length**。同理, 用 `sqlite3` 直接**逐文件复制**
+   一个正在跑的 WAL 库是不安全的(读出来条数都不对), 要复制就用
+   `Connection.backup()`(`fix_blank_away.py` 就是这么做副本的)。
    **别再往提醒文案里塞裸 emoji 直接 print。**
 
 5. **`pythonw` 下 stdout 是"存在但没人看"**(不报错,内容消失)。所以必须有文件日志
@@ -462,6 +468,23 @@ coverage_minute(day, minute, ticks, pose_hits, face_hits, judging, PRIMARY KEY(d
 是 2026-09-27 加的一类:**画面本身是黑的**, 既不算专注也不算离开。`camera_blank` 的
 `detail` 里带着灰度均值/标准差/帧间变化/帧率 —— 下一次出故障时, 这几个数就是证据。
 
+`nudge_false_alarm` / `episode_false_alarm` 只出现在 **2026-09-27 那一次数据修正**里
+(PROGRESS 七之二十一): 那次"离开座位太久"是真响了、但原因是黑帧, 所以行留着、分类改掉,
+任何统计都不再数它。真库改之前的备份是 `data/events.sqlite3.bak-<时间戳>`。
+
+### 复盘一段"疑似误报"的标准动作(2026-09-27/28 摸索出来的)
+
+顺序不能颠倒, 否则很容易去"修"一个没坏的东西:
+
+1. `_db_day.py <day>` —— 看逐分钟**帧率**。掉到 ~1Hz = 采集流死了; 保持 5Hz = 流是好的。
+2. `check_captures_brightness.py <day>` —— 量证据图里摄像头那一半的标准差。
+   **接近 0 = 画面是黑的**(设备问题); 30~70 = 画面正常(接下来只能怀疑"人不在")。
+3. 日志里那条提醒带的**前台窗口标题**: `LockingWindow` = 机器锁了, 人确实走了;
+   是"视频播放/网课/PDF"这类 = 你说不定就在桌前 —— 这才值得怀疑。
+4. 只有当 1 和 2 都指向"画面坏了"时才谈数据修正, 而且要走 `fix_blank_away.py` 那种
+   带门槛的脚本(默认演练 + 备份)。**单帧的 `detect_in_captures.py` 结论单独不成立** ——
+   实测空椅子上 Pose 也会报"有人"。
+
 ### 文件日志(`data/logs/YYYY-MM-DD.log`)
 
 每行 `HH:MM:SS LEVEL msg`。关键行:
@@ -507,6 +530,10 @@ coverage_minute(day, minute, ticks, pose_hits, face_hits, judging, PRIMARY KEY(d
 | `analyze_log.py` | 一键体检:错误行、派发记录、状态机快照、分集/提醒对照、**按信号的分集统计**、低覆盖率分钟 |
 | `check_live_frames.py` | **真机验画面判据**:连量 20 帧真画面, 打印 均值/标准差/帧间变化 与判定, 确认 `blank_std` 不会误伤活画面(2026-09-27 实测活画面 std≈49、静止时帧间变化 0.5~0.9) |
 | `calib_blank.py` | 用 `captures/` 里的证据图标定"有画面/没画面"的灰度统计(黑帧 std=0.01 / 活画面 std=65) |
+| `check_captures_brightness.py <day>` | 把某天每张证据图的**摄像头那一半**量出来(均值/标准差/p99), 和当天的提醒事件并排看 —— **判断"人不在"还是"画面坏了"的第一招** |
+| `detect_in_captures.py <day>` | 把证据图重新喂进**完整生产管线**(Pose + 裁头 + Face), 看模型能不能从那张图里找到人。⚠️ **单帧结论不能当证据**: 空椅子上 Pose 也会误检, 必须和窗口标题/逐分钟覆盖率交叉验证(见 PROGRESS 七之二十一) |
+| `fix_blank_away.py` | 9/27 那 38 分钟错账的**数据修正**(默认演练, `--apply` 才动真库且先备份); 门槛 = 纯黑证据图 + 0 命中 + 0.95Hz 三条同时成立 |
+| `_db_day.py <day>` | 按天看事件 kind 统计 + 逐分钟 帧率/人脸/Pose 覆盖率(比翻日志省事) |
 | `_dbg_deadcam.py` | 复盘某天上午的逐分钟覆盖率与事件(区分"没帧"和"有帧但检不到") |
 | `posenoise.py` | 离线量 Pose 头部关键点的几何与噪声(跑 `captures/*.jpg` 的摄像头那一半, **不需要摄像头**) |
 | `poselabel.py` | **M4 真人标定**(需要摄像头空闲):按屏幕提示摆 5 个姿势约 2.5 分钟,**每段用提示音报序号**(响 N 声 = 第 N 个姿势),并直接给出"低头/转头判据分得开/分不开"与建议阈值。开头 2.5 秒样本不计入(换姿势的延迟) |
